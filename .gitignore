@@ -1,0 +1,31 @@
+# Node
+node_modules
+
+# Next
+.next
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual Env
+.venv
+
+# Environment
+.env
+
+# Mac
+.DS_Store
+
+# VSCode
+.vscode
+
+# Logs
+logs
+
+# Database
+*.db
+
+# Docker
+postgres_data
+redis_data
