@@ -1,3 +1,4 @@
+aiofiles==25.1.0
 alembic==1.16.5
 annotated-doc==0.0.4
 annotated-types==0.7.0
@@ -11,10 +12,12 @@ cryptography==49.0.0
 ecdsa==0.19.2
 exceptiongroup==1.3.1
 fastapi==0.128.8
+greenlet==3.2.5
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 idna==3.18
+loguru==0.7.3
 Mako==1.3.12
 MarkupSafe==3.0.3
 passlib==1.7.4
@@ -26,6 +29,7 @@ pydantic-settings==2.11.0
 pydantic_core==2.46.4
 python-dotenv==1.2.1
 python-jose==3.5.0
+python-multipart==0.0.20
 redis==7.0.1
 rsa==4.9.1
 six==1.17.0

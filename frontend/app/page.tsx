@@ -13,14 +13,18 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="min-h-screen flex items-center justify-center">
-      <div className="border rounded-xl p-10 space-y-4">
-        <h1 className="text-3xl font-bold">
+    <main className="flex min-h-screen items-center justify-center">
+      <div className="rounded-xl border p-10">
+        <h1 className="mb-6 text-3xl font-bold">
           Job Auto Apply
         </h1>
 
         <pre>
-          {JSON.stringify(health, null, 2)}
+          {JSON.stringify(
+            health,
+            null,
+            2
+          )}
         </pre>
       </div>
     </main>

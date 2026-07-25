@@ -1,9 +1,16 @@
-from pydantic_settings import BaseSettings
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BASE_DIR = Path(__file__).resolve().parents[3]
+
+ENV_FILE = BASE_DIR / ".env"
 
 
 class Settings(BaseSettings):
-
     APP_NAME: str
+
+    APP_ENV: str
 
     DATABASE_URL: str
 
@@ -15,10 +22,10 @@ class Settings(BaseSettings):
 
     BACKEND_PORT: int
 
-    APP_ENV: str
-
-    class Config:
-        env_file = "../../.env"
+    model_config = SettingsConfigDict(
+        env_file=ENV_FILE,
+        extra="ignore"
+    )
 
 
 settings = Settings()
