@@ -1,9 +1,12 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from fastapi.security import HTTPBearer
 from jose import JWTError, jwt
 
 from app.config.settings import settings
+
+security = HTTPBearer()
 
 
 def create_access_token(user_id: str) -> str:
