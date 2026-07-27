@@ -7,7 +7,6 @@ from sqlalchemy import String
 from sqlalchemy import Text
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
-from sqlalchemy import func
 from app.db.base_model import BaseModel
 
 
@@ -81,7 +80,8 @@ class Job(BaseModel):
 
     scraped_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=func.now(),
+        default=datetime.utcnow,
+        nullable=False,
     )
 
     status: Mapped[str] = mapped_column(

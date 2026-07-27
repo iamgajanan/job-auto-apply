@@ -39,3 +39,14 @@ def search_jobs(
     return {
         "jobs": jobs,
     }
+
+
+@router.get("")
+def get_jobs(
+    db: Session = Depends(get_db),
+):
+    service = JobService(
+        JobRepository(db),
+    )
+
+    return service.get_jobs()

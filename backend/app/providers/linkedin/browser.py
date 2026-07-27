@@ -34,7 +34,7 @@ class BrowserManager:
             )
         )
 
-        self.page = self.context.new_page()
+        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
 
         return self.page
 

@@ -58,3 +58,10 @@ build/
 # Temporary
 # ===========================
 packages.txt
+
+# Playwright
+**/browser-data/
+
+# Screenshots
+backend/linkedin_jobs.html
+backend/linkedin_jobs.png
