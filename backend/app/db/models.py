@@ -1,8 +1,5 @@
-"""
-Import all SQLAlchemy models here.
+from app.features.auth.model import User
 
-Alembic will import this file.
-"""
-
-# Example:
-# from app.features.auth.model import User
+__all__ = [
+    "User",
+]
