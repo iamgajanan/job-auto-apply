@@ -1,31 +1,60 @@
-# Node
-node_modules
-
-# Next
-.next
-
+# ===========================
 # Python
+# ===========================
+.venv/
+*/.venv/
+venv/
+*/venv/
+
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 
-# Virtual Env
-.venv
+# ===========================
+# Node
+# ===========================
+node_modules/
+.next/
+out/
 
+# ===========================
 # Environment
+# ===========================
 .env
+.env.local
+.env.*.local
 
-# Mac
+# ===========================
+# IDE
+# ===========================
+.vscode/
+.idea/
+
+# ===========================
+# macOS
+# ===========================
 .DS_Store
 
-# VSCode
-.vscode
-
+# ===========================
 # Logs
-logs
+# ===========================
+logs/
+*.log
 
-# Database
-*.db
+# ===========================
+# Coverage
+# ===========================
+.coverage
+htmlcov/
+.pytest_cache/
 
-# Docker
-postgres_data
-redis_data
+# ===========================
+# Build
+# ===========================
+dist/
+build/
+
+# ===========================
+# Temporary
+# ===========================
+packages.txt
