@@ -3,6 +3,10 @@ from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
 
+from typing import Optional
+
+posted_within: Optional[str] = None
+
 class JobSearchRequest(BaseModel):
     platform: str
     job_title: str
@@ -10,7 +14,7 @@ class JobSearchRequest(BaseModel):
     experience: str
     easy_apply: bool = False
     work_mode: str = "Any"
-
+    posted_within: Optional[str] = None
 
 class JobResponse(BaseModel):
     platform: str
@@ -22,10 +26,9 @@ class JobResponse(BaseModel):
     salary: str
     experience: str
 
-    work_mode: str
-
-    easy_apply: bool
-
+    easy_apply: bool 
+    work_mode: str 
+    posted_within: Optional[str] = None
     job_url: str
 
     apply_url: str
