@@ -3,7 +3,18 @@ from urllib.parse import quote
 from app.providers.linkedin.browser import BrowserManager
 
 
-class NaukriSearch:
+from app.providers.base import BaseProvider, ProviderCapabilities
+
+
+class NaukriSearch(BaseProvider):
+    name = "naukri"
+
+    capabilities = ProviderCapabilities(
+        easy_apply=False,
+        remote=True,
+        salary=True,
+        login=False,
+    )
 
     def search(self, request):
 

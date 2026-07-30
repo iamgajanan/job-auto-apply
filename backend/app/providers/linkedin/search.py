@@ -4,8 +4,19 @@ from app.providers.linkedin.browser import BrowserManager
 from app.gateway.humanizer import Humanizer
 import time
 
+from app.providers.base import BaseProvider, ProviderCapabilities
 
-class LinkedInSearch:
+
+class LinkedInSearch(BaseProvider):
+     
+    name = "linkedin"
+
+    capabilities = ProviderCapabilities(
+        easy_apply=True,
+        remote=True,
+        salary=True,
+        login=True,
+    )
     start = time.time()
     JOB_LIMIT = 100          # hard cap: never scrape/return more than this
     PAGE_SIZE = 25           # LinkedIn's cards-per-page

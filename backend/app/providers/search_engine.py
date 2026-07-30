@@ -1,19 +1,29 @@
-from app.providers.linkedin.search import LinkedInSearch
-from app.providers.naukri.search import NaukriSearch
+from app.providers.registry import ProviderRegistry
 
 
 class SearchEngine:
 
     def __init__(self):
-        self.linkedin = LinkedInSearch()
-        self.naukri = NaukriSearch()
+        self.registry = ProviderRegistry()
 
     def search(self, request):
 
-        if request.platform.lower() == "linkedin":
-            return self.linkedin.search(request)
+        jobs = []
 
-        if request.platform.lower() == "naukri":
-            return self.naukri.search(request)
+        if request.platform.lower() == "all":
+            providers = self.registry.get_all()
+        else:
+            providers = [
+                self.registry.get(request.platform)
+            ]
 
-        raise Exception("Unsupported platform")
+        for provider in providers:
+
+            provider.validate_request(request)
+
+            provider_jobs = provider.search(request)
+
+            if provider_jobs:
+                jobs.extend(provider_jobs)
+
+        return jobs

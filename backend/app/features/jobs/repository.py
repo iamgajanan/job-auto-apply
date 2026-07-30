@@ -8,84 +8,93 @@ class JobRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    # def save(self, job_data):
-
-    #     # Don't persist search-only fields
-    #     job_data = job_data.copy()
-    #     job_data.pop("posted_within", None)
-
-    #     existing = (
-    #         self.db.query(Job)
-    #         .filter(Job.job_id == job_data["job_id"])
-    #         .first()
-    #     )
-
-    #     if existing:
-
-    #         existing.title = job_data["title"]
-    #         existing.company = job_data["company"]
-    #         existing.location = job_data["location"]
-    #         existing.salary = job_data["salary"]
-    #         existing.experience = job_data["experience"]
-    #         existing.work_mode = job_data["work_mode"]
-    #         existing.easy_apply = job_data["easy_apply"]
-    #         existing.job_url = job_data["job_url"]
-    #         existing.company_logo = job_data["company_logo"]
-    #         existing.posted_at = job_data["posted_at"]
-
-    #         self.db.commit()
-    #         self.db.refresh(existing)
-
-    #         return existing
-
-    #     job = Job(**job_data)
-
-    #     self.db.add(job)
-    #     self.db.commit()
-    #     self.db.refresh(job)
-
-    #     return job
-
     def save_many(self, jobs):
 
         saved = []
 
-        for job_data in jobs:
+        try:
 
-            job_data = job_data.copy()
-            job_data.pop("posted_within", None)
+            for job_data in jobs:
 
-            existing = (
-                self.db.query(Job)
-                .filter(Job.job_id == job_data["job_id"])
-                .first()
-            )
+                job_data = job_data.copy()
 
-            if existing:
+                job_data.pop("posted_within", None)
 
-                existing.title = job_data["title"]
-                existing.company = job_data["company"]
-                existing.location = job_data["location"]
-                existing.salary = job_data["salary"]
-                existing.experience = job_data["experience"]
-                existing.work_mode = job_data["work_mode"]
-                existing.easy_apply = job_data["easy_apply"]
-                existing.job_url = job_data["job_url"]
-                existing.company_logo = job_data["company_logo"]
-                existing.posted_at = job_data["posted_at"]
+                # Prevent NULL values
+                job_data["salary"] = (
+                    job_data.get("salary")
+                    or "Not Disclosed"
+                )
 
-                saved.append(existing)
+                job_data["experience"] = (
+                    job_data.get("experience")
+                    or "Not Mentioned"
+                )
 
-            else:
+                job_data["work_mode"] = (
+                    job_data.get("work_mode")
+                    or "Unknown"
+                )
 
-                job = Job(**job_data)
-                self.db.add(job)
-                saved.append(job)
+                job_data["apply_url"] = (
+                    job_data.get("apply_url")
+                    or ""
+                )
 
-        self.db.commit()
+                job_data["description"] = (
+                    job_data.get("description")
+                    or ""
+                )
 
-        return saved
-    
+                job_data["company_logo"] = (
+                    job_data.get("company_logo")
+                    or ""
+                )
+
+                existing = (
+                    self.db.query(Job)
+                    .filter(Job.job_id == job_data["job_id"])
+                    .first()
+                )
+
+                if existing:
+
+                    existing.title = job_data["title"]
+                    existing.company = job_data["company"]
+                    existing.location = job_data["location"]
+                    existing.salary = job_data["salary"]
+                    existing.experience = job_data["experience"]
+                    existing.work_mode = job_data["work_mode"]
+                    existing.easy_apply = job_data["easy_apply"]
+                    existing.job_url = job_data["job_url"]
+                    existing.apply_url = job_data["apply_url"]
+                    existing.description = job_data["description"]
+                    existing.company_logo = job_data["company_logo"]
+                    existing.posted_at = job_data["posted_at"]
+
+                    saved.append(existing)
+
+                else:
+
+                    job = Job(**job_data)
+
+                    self.db.add(job)
+
+                    saved.append(job)
+
+            self.db.commit()
+
+            for job in saved:
+                self.db.refresh(job)
+
+            return saved
+
+        except Exception:
+
+            self.db.rollback()
+
+            raise
+
     def get_all(self):
 
         return (
