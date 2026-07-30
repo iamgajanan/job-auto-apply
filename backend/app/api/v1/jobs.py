@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -28,13 +28,20 @@ def health():
 )
 def search_jobs(
     request: JobSearchRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
 ):
+
     service = JobService(
         JobRepository(db),
     )
 
-    jobs = service.search_jobs(request)
+    client_ip = http_request.client.host
+
+    jobs = service.search_jobs(
+        request,
+        client_ip,
+    )
 
     return {
         "jobs": jobs,
@@ -45,6 +52,7 @@ def search_jobs(
 def get_jobs(
     db: Session = Depends(get_db),
 ):
+
     service = JobService(
         JobRepository(db),
     )

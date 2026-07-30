@@ -88,3 +88,42 @@ class Job(BaseModel):
         String(50),
         default="NEW",
     )
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "platform": self.platform,
+            "job_id": self.job_id,
+            "title": self.title,
+            "company": self.company,
+            "location": self.location,
+            "salary": self.salary,
+            "experience": self.experience,
+            "work_mode": self.work_mode,
+            "easy_apply": self.easy_apply,
+            "job_url": self.job_url,
+            "apply_url": self.apply_url,
+            "description": self.description,
+            "company_logo": self.company_logo,
+            "posted_at": (
+                self.posted_at.isoformat()
+                if self.posted_at
+                else None
+            ),
+            "scraped_at": (
+                self.scraped_at.isoformat()
+                if self.scraped_at
+                else None
+            ),
+            "status": self.status,
+            "created_at": (
+                self.created_at.isoformat()
+                if self.created_at
+                else None
+            ),
+            "updated_at": (
+                self.updated_at.isoformat()
+                if self.updated_at
+                else None
+            ),
+        }
