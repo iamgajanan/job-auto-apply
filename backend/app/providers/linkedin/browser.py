@@ -22,7 +22,7 @@ class BrowserManager:
 
         self.context = self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile),
-            headless=False,          # Faster
+            headless=True,          # Faster
             slow_mo=0,              # Remove artificial delay
             viewport={
                 "width": 1440,

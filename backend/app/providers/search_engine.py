@@ -5,9 +5,7 @@ from app.providers.naukri.search import NaukriSearch
 class SearchEngine:
 
     def __init__(self):
-
         self.linkedin = LinkedInSearch()
-
         self.naukri = NaukriSearch()
 
     def search(self, request):
@@ -18,4 +16,4 @@ class SearchEngine:
         if request.platform.lower() == "naukri":
             return self.naukri.search(request)
 
-        return []
+        raise Exception("Unsupported platform")

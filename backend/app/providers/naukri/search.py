@@ -1,17 +1,40 @@
+from urllib.parse import quote
+
+from app.providers.linkedin.browser import BrowserManager
+
+
 class NaukriSearch:
 
     def search(self, request):
-        return [
-            {
-                "platform": "naukri",
-                "job_id": "naukri_001",
-                "title": request.job_title,
-                "company": "Infosys",
-                "location": request.location,
-                "salary": "₹18 LPA",
-                "experience": request.experience,
-                "easy_apply": False,
-                "job_url": "https://naukri.com/job/111",
-                "apply_url": "https://naukri.com/job/111",
-            }
-        ]
+
+        browser = BrowserManager()
+        page = browser.launch()
+
+        keyword = quote(request.job_title or "")
+        location = quote(request.location or "")
+
+        url = (
+            f"https://www.naukri.com/{keyword.replace('%20','-')}"
+            f"-jobs-in-{location.replace('%20','-')}"
+        )
+
+        print("=" * 80)
+        print(url)
+        print("=" * 80)
+
+        page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+
+        page.wait_for_timeout(3000)
+
+        page.screenshot(path="naukri.png", full_page=True)
+
+        with open("naukri.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+
+        browser.close()
+
+        return []
