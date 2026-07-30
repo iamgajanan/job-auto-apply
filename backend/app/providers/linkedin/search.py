@@ -1,10 +1,12 @@
 from urllib.parse import quote
 
 from app.providers.linkedin.browser import BrowserManager
+from app.gateway.humanizer import Humanizer
+import time
 
 
 class LinkedInSearch:
-
+    start = time.time()
     JOB_LIMIT = 100          # hard cap: never scrape/return more than this
     PAGE_SIZE = 25           # LinkedIn's cards-per-page
     MAX_PAGES = 20           # safety cap on pagination loop
@@ -95,6 +97,8 @@ class LinkedInSearch:
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
+            print("goto:", time.time() - start)
+            Humanizer.think(page)
 
             # Wait for at least one card to show up instead of a fixed
             # blind sleep -- falls back to the fixed wait if none appear
@@ -162,11 +166,13 @@ class LinkedInSearch:
             print("=" * 80)
 
             if best_info:
+                Humanizer.move_mouse(page)
 
                 previous = 0
                 stall_count = 0
 
                 for i in range(self.MAX_SCROLLS_PER_PAGE):
+                    Humanizer.random_scroll(page)
 
                     page.evaluate("""
                     () => {
@@ -205,13 +211,14 @@ class LinkedInSearch:
                         stall_count = 0
 
                     previous = current
-
+                    print("scroll:", time.time() - start)
                     # Stop scrolling early if we've already got enough
                     # jobs overall (accounting for what's on earlier pages)
                     if len(jobs) + current >= self.JOB_LIMIT:
                         break
 
             cards = page.locator(".job-card-container")
+            Humanizer.random_delay(page)
 
             print(f"Page {page_num + 1} final jobs:", cards.count())
 

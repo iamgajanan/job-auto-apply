@@ -1,31 +1,37 @@
+from time import perf_counter
+
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 
 from app.common.services.base_service import BaseService
-from app.gateway.cache import SearchCache
-from app.gateway.limiter import RateLimiter
-from app.providers.search_engine import SearchEngine
 
 
 class JobService(BaseService):
 
-    def __init__(self, repository):
-
+    def __init__(
+        self,
+        repository,
+        audit_service,
+        cache,
+        limiter,
+        engine,
+    ):
         super().__init__(repository)
 
-        self.cache = SearchCache()
-        self.limiter = RateLimiter()
+        self.audit = audit_service
+        self.cache = cache
+        self.limiter = limiter
+        self.engine = engine
 
     def search_jobs(self, request, client_ip):
 
-        # -------------------------
-        # Rate Limit
-        # -------------------------
+        started = perf_counter()
+
+        provider = request.platform
+        keyword = request.job_title
+        location = request.location
 
         allowed, ttl = self.limiter.allow(client_ip)
-
-        print(allowed)
-        print(ttl)
 
         if not allowed:
             raise HTTPException(
@@ -33,43 +39,68 @@ class JobService(BaseService):
                 detail=f"Too many requests. Try again in {ttl} seconds.",
             )
 
-        # -------------------------
-        # Redis Cache
-        # -------------------------
-
         cached = self.cache.get(request)
 
         if cached:
-            print("✅ CACHE HIT")
+
+            duration = int((perf_counter() - started) * 1000)
+
+            self.audit.log(
+                provider=provider,
+                keyword=keyword,
+                location=location,
+                client_ip=client_ip,
+                response_source="CACHE",
+                jobs_found=len(cached),
+                duration_ms=duration,
+                status="SUCCESS",
+            )
+
             return cached
 
-        print("❌ CACHE MISS")
+        try:
 
-        # -------------------------
-        # Scrape
-        # -------------------------
+            jobs = self.engine.search(request)
 
-        engine = SearchEngine()
+            saved_jobs = self.repository.save_many(jobs)
 
-        jobs = engine.search(request)
+            self.cache.set(
+                request,
+                jsonable_encoder(saved_jobs),
+            )
 
-        # -------------------------
-        # Save
-        # -------------------------
+            duration = int((perf_counter() - started) * 1000)
 
-        saved_jobs = self.repository.save_many(jobs)
+            self.audit.log(
+                provider=provider,
+                keyword=keyword,
+                location=location,
+                client_ip=client_ip,
+                response_source="SCRAPER",
+                jobs_found=len(saved_jobs),
+                duration_ms=duration,
+                status="SUCCESS",
+            )
 
-        # -------------------------
-        # Cache
-        # -------------------------
+            return saved_jobs
 
-        self.cache.set(
-            request,
-            jsonable_encoder(saved_jobs),
-        )
+        except Exception as e:
 
-        return saved_jobs
+            duration = int((perf_counter() - started) * 1000)
+
+            self.audit.log(
+                provider=provider,
+                keyword=keyword,
+                location=location,
+                client_ip=client_ip,
+                response_source="SCRAPER",
+                jobs_found=0,
+                duration_ms=duration,
+                status="FAILED",
+                error=str(e),
+            )
+
+            raise
 
     def get_jobs(self):
-
         return self.repository.get_all()
