@@ -61,6 +61,7 @@ packages.txt
 
 # Playwright
 **/browser-data/
+**/browser-data-naukri/
 
 # Screenshots
 backend/linkedin_jobs.html

@@ -7,11 +7,13 @@ class LinkedInLogin:
 
         browser = BrowserManager()
 
-        page = browser.launch()
+        # headed -- a human needs to actually see this page to type
+        # credentials / solve any checkpoint.
+        page = browser.launch(headless=False)
 
         page.goto(
             "https://www.linkedin.com/login",
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
         )
 
         return browser, page

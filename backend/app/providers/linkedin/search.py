@@ -1,7 +1,9 @@
 from urllib.parse import quote
+from pathlib import Path
 
 from app.providers.linkedin.browser import BrowserManager
 from app.gateway.humanizer import Humanizer
+from app.core.logger import app_logger
 import time
 
 from app.providers.base import BaseProvider, ProviderCapabilities
@@ -17,7 +19,6 @@ class LinkedInSearch(BaseProvider):
         salary=True,
         login=True,
     )
-    start = time.time()
     JOB_LIMIT = 100          # hard cap: never scrape/return more than this
     PAGE_SIZE = 25           # LinkedIn's cards-per-page
     MAX_PAGES = 20           # safety cap on pagination loop
@@ -25,6 +26,21 @@ class LinkedInSearch(BaseProvider):
     SCROLL_POLL_TIMEOUT_MS = 1800  # max time to wait per scroll for new cards to render
     MAX_CONSECUTIVE_STALLS = 2  # require 2 no-change scrolls in a row before giving up
     POST_NAV_WAIT_MS = 1500    # was 3000 -- domcontentloaded + this is enough
+
+    DEBUG_DIR = Path(__file__).resolve().parents[3] / "debug"
+
+    def _save_debug(self, page, tag: str):
+        try:
+            self.DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+            page.screenshot(
+                path=str(self.DEBUG_DIR / f"linkedin-{tag}.png"),
+                full_page=True,
+            )
+            (self.DEBUG_DIR / f"linkedin-{tag}.html").write_text(
+                page.content(), encoding="utf-8"
+            )
+        except Exception as e:
+            app_logger.warning(f"LinkedIn debug save failed: {e}")
 
     def search(self, request):
 
@@ -95,20 +111,18 @@ class LinkedInSearch(BaseProvider):
 
         for page_num in range(self.MAX_PAGES):
 
-            start = page_num * self.PAGE_SIZE
-            url = base_url + f"&start={start}"
+            page_start_time = time.time()
+            start_offset = page_num * self.PAGE_SIZE
+            url = base_url + f"&start={start_offset}"
 
-            print("=" * 80)
-            print(f"Page {page_num + 1} | start={start}")
-            print(url)
-            print("=" * 80)
+            app_logger.debug(f"LinkedIn page {page_num + 1} | start={start_offset} | {url}")
 
             page.goto(
                 url,
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            print("goto:", time.time() - start)
+            app_logger.debug(f"goto took {time.time() - page_start_time:.2f}s")
             Humanizer.think(page)
 
             # Wait for at least one card to show up instead of a fixed
@@ -122,10 +136,10 @@ class LinkedInSearch(BaseProvider):
             except Exception:
                 page.wait_for_timeout(self.POST_NAV_WAIT_MS)
 
-            print("Actual URL :", page.url)
+            app_logger.debug(f"Actual URL: {page.url}")
 
             cards = page.locator(".job-card-container")
-            print("Initially rendered:", cards.count())
+            app_logger.debug(f"Initially rendered: {cards.count()}")
 
             # ---------------------------------------
             # Find the real scrollable container.
@@ -171,10 +185,7 @@ class LinkedInSearch(BaseProvider):
             }
             """)
 
-            print("=" * 80)
-            print("Largest scrollable element")
-            print(best_info)
-            print("=" * 80)
+            app_logger.debug(f"Largest scrollable element: {best_info}")
 
             if best_info:
                 Humanizer.move_mouse(page)
@@ -212,7 +223,7 @@ class LinkedInSearch(BaseProvider):
                         if current > previous:
                             break  # new cards rendered, move to next scroll
 
-                    print(f"Scroll {i + 1}: {current} (waited {elapsed_ms}ms)")
+                    app_logger.debug(f"Scroll {i + 1}: {current} (waited {elapsed_ms}ms)")
 
                     if current == previous:
                         stall_count += 1
@@ -222,7 +233,7 @@ class LinkedInSearch(BaseProvider):
                         stall_count = 0
 
                     previous = current
-                    print("scroll:", time.time() - start)
+                    app_logger.debug(f"scroll cumulative time: {time.time() - page_start_time:.2f}s")
                     # Stop scrolling early if we've already got enough
                     # jobs overall (accounting for what's on earlier pages)
                     if len(jobs) + current >= self.JOB_LIMIT:
@@ -231,11 +242,16 @@ class LinkedInSearch(BaseProvider):
             cards = page.locator(".job-card-container")
             Humanizer.random_delay(page)
 
-            print(f"Page {page_num + 1} final jobs:", cards.count())
+            app_logger.debug(f"Page {page_num + 1} final jobs: {cards.count()}")
 
             if cards.count() == 0:
                 # No cards on this page at all -> we've run past the end
-                print("No cards found on this page. Stopping pagination.")
+                # OR something went wrong (rate limit, markup change, etc.)
+                if page_num == 0:
+                    # First page with zero cards is unusual -- save debug
+                    # artifacts so we can inspect what actually loaded
+                    self._save_debug(page, "zero-results")
+                app_logger.debug("No cards found on this page. Stopping pagination.")
                 break
 
             page_new_count = 0
@@ -356,26 +372,24 @@ class LinkedInSearch(BaseProvider):
 
                 page_new_count += 1
 
-            print(f"Page {page_num + 1} added {page_new_count} new jobs. Total so far: {len(jobs)}")
+            app_logger.debug(f"Page {page_num + 1} added {page_new_count} new jobs. Total so far: {len(jobs)}")
 
             # Cap reached -- stop paginating entirely.
             if len(jobs) >= self.JOB_LIMIT:
-                print(f"Reached JOB_LIMIT ({self.JOB_LIMIT}). Stopping pagination.")
+                app_logger.info(f"Reached JOB_LIMIT ({self.JOB_LIMIT}). Stopping pagination.")
                 break
 
             # If this page contributed no new (unique) jobs,
             # we've reached the end of the results.
             if page_new_count == 0:
-                print("No new jobs added from this page. Stopping pagination.")
+                app_logger.debug("No new jobs added from this page. Stopping pagination.")
                 break
 
         # Final safety trim -- guarantees we never return more than
         # JOB_LIMIT even if some edge case let extra ones slip through.
         jobs = jobs[: self.JOB_LIMIT]
 
-        print("=" * 80)
-        print("TOTAL JOBS SCRAPED:", len(jobs))
-        print("=" * 80)
+        app_logger.info(f"TOTAL LINKEDIN JOBS SCRAPED: {len(jobs)}")
 
         browser.close()
 

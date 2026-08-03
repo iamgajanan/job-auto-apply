@@ -3,17 +3,24 @@ import json
 
 import redis
 
+from app.config.settings import settings
+
+# One shared connection pool for the whole process instead of every
+# SearchCache() instance opening its own connection -- avoids exhausting
+# Redis connections under load, and respects REDIS_URL from settings
+# instead of a hardcoded localhost that breaks outside local dev
+# (Docker networking, managed Redis, staging/prod, ...).
+_redis_pool = redis.ConnectionPool.from_url(
+    settings.REDIS_URL,
+    decode_responses=True,
+)
+
 
 class SearchCache:
 
     def __init__(self):
 
-        self.redis = redis.Redis(
-            host="localhost",
-            port=6379,
-            db=0,
-            decode_responses=True,
-        )
+        self.redis = redis.Redis(connection_pool=_redis_pool)
 
         self.ttl = 60 * 15   # 15 minutes
 
