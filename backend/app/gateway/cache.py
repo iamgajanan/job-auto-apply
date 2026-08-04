@@ -34,6 +34,7 @@ class SearchCache:
             "easy_apply": request.easy_apply,
             "work_mode": request.work_mode,
             "posted_within": request.posted_within,
+            "remote": request.remote,
         }
 
         raw = json.dumps(payload, sort_keys=True)

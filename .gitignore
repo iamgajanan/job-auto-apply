@@ -41,6 +41,8 @@ out/
 logs/
 *.log
 
+backend/debug/
+backend/logs/
 # ===========================
 # Coverage
 # ===========================

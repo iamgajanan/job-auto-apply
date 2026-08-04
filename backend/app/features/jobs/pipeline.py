@@ -20,6 +20,11 @@ class SearchPipeline:
         self.limiter = limiter
         self.engine = engine
 
+    def _platforms_for(self, request):
+        if request.platform.lower() == "all":
+            return self.engine.registry.list()
+        return [request.platform.lower()]
+
     def execute(self, request, client_ip):
 
         started = perf_counter()
@@ -28,20 +33,12 @@ class SearchPipeline:
         keyword = request.job_title
         location = request.location
 
-        allowed, ttl = self.limiter.allow(client_ip)
-
-        if not allowed:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Too many requests. Try again in {ttl} seconds.",
-            )
-
+        # Cache FIRST: a cache hit causes zero upstream traffic and therefore
+        # should not consume either client or platform scrape allowance.
         cached = self.cache.get(request)
 
         if cached:
-
             duration = int((perf_counter() - started) * 1000)
-
             self.audit.log(
                 provider=provider,
                 keyword=keyword,
@@ -52,13 +49,28 @@ class SearchPipeline:
                 duration_ms=duration,
                 status="SUCCESS",
             )
-
             return cached
 
+        # Client protection applies only when work would actually reach a scraper.
+        allowed, ttl = self.limiter.allow_client(client_ip)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many uncached searches. Try again in {ttl} seconds.",
+            )
+
+        # Upstream protection is separate from the caller/IP limiter. For 'all',
+        # reserve every provider atomically before starting either scraper.
+        platforms = self._platforms_for(request)
+        allowed, ttl = self.limiter.allow_platforms(platforms)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Search provider cooldown active. Try again in {ttl} seconds.",
+            )
+
         try:
-
             jobs = self.engine.search(request)
-
             saved_jobs = self.repository.save_many(jobs)
 
             self.cache.set(
@@ -67,7 +79,6 @@ class SearchPipeline:
             )
 
             duration = int((perf_counter() - started) * 1000)
-
             self.audit.log(
                 provider=provider,
                 keyword=keyword,
@@ -78,13 +89,10 @@ class SearchPipeline:
                 duration_ms=duration,
                 status="SUCCESS",
             )
-
             return saved_jobs
 
         except Exception as e:
-
             duration = int((perf_counter() - started) * 1000)
-
             self.audit.log(
                 provider=provider,
                 keyword=keyword,
@@ -96,5 +104,4 @@ class SearchPipeline:
                 status="FAILED",
                 error=str(e),
             )
-
             raise
