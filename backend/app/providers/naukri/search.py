@@ -181,7 +181,8 @@ class NaukriSearch(BaseProvider):
             jobs = []
             seen_job_ids = set()
             start_time = time.time()
-
+            empty_filtered_pages = 0
+            MAX_EMPTY_FILTERED_PAGES = 2
             for page_num in range(self.MAX_PAGES):
 
                 url = base_path if page_num == 0 else f"{base_path}-{page_num + 1}"
@@ -318,6 +319,16 @@ class NaukriSearch(BaseProvider):
                     break
 
                 if page_new_count == 0:
+                    empty_filtered_pages += 1
+                else:
+                    empty_filtered_pages = 0
+
+                if empty_filtered_pages >= MAX_EMPTY_FILTERED_PAGES:
+                    app_logger.info(
+                        "Stopping Naukri pagination after %s consecutive pages "
+                        "with no matching jobs",
+                        empty_filtered_pages,
+                    )
                     break
 
                 Humanizer.random_delay(page)

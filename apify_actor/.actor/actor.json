@@ -1,0 +1,13 @@
+{
+  "actorSpecification": 1,
+  "name": "job-scraper-linkedin-naukri",
+  "title": "LinkedIn & Naukri Job Scraper",
+  "version": "1.0",
+  "buildTag": "latest",
+  "dockerfile": "../Dockerfile",
+  "dockerContextDir": "../..",
+  "input": "./INPUT_SCHEMA.json",
+  "readme": "../README.md",
+  "minMemoryMbytes": 1024,
+  "maxMemoryMbytes": 4096
+}

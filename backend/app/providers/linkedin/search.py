@@ -112,7 +112,8 @@ class LinkedInSearch(BaseProvider):
             # Stop as soon as: a page adds no new jobs,
             # OR we hit JOB_LIMIT, OR MAX_PAGES reached.
             # ---------------------------------------
-
+            empty_filtered_pages = 0
+            MAX_EMPTY_FILTERED_PAGES = 2            
             for page_num in range(self.MAX_PAGES):
 
                 page_start_time = time.time()
@@ -387,8 +388,19 @@ class LinkedInSearch(BaseProvider):
 
                 # If this page contributed no new (unique) jobs,
                 # we've reached the end of the results.
+                empty_filtered_pages = 0
+                MAX_EMPTY_FILTERED_PAGES = 2
                 if page_new_count == 0:
-                    app_logger.debug("No new jobs added from this page. Stopping pagination.")
+                    empty_filtered_pages += 1
+                else:
+                    empty_filtered_pages = 0
+
+                if empty_filtered_pages >= MAX_EMPTY_FILTERED_PAGES:
+                    app_logger.info(
+                        "Stopping LinkedIn pagination after %s consecutive pages "
+                        "with no matching jobs",
+                        empty_filtered_pages,
+                    )
                     break
 
             # Final safety trim -- guarantees we never return more than
