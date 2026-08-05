@@ -1,9 +1,21 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from apify import Actor
 
 from app.features.jobs.schema import JobSearchRequest
 from app.providers.naukri.search import NaukriSearch
+
+
+def run_scraper(request: JobSearchRequest, max_results: int) -> list:
+    """
+    Runs the sync Playwright scraper in a plain thread,
+    completely outside the asyncio event loop.
+    """
+    scraper = NaukriSearch()
+    scraper.JOB_LIMIT = max_results
+    jobs = scraper.search(request)
+    return jobs[:max_results]
 
 
 async def main() -> None:
@@ -43,36 +55,35 @@ async def main() -> None:
             location=location,
             experience=experience,
             work_mode=work_mode,
-            easy_apply=False,       # Naukri doesn't have easy apply
+            easy_apply=False,
             posted_within=posted_within,
         )
 
-        scraper = NaukriSearch()
-        scraper.JOB_LIMIT = max_results  # honour user's requested cap
-
-        try:
-            jobs = scraper.search(request)
-            jobs = jobs[:max_results]   # safety trim
-
-            if jobs:
-                await Actor.push_data(jobs)
-
-            await Actor.set_value(
-                "ACTOR_STATS",
-                {
-                    "jobs_scraped":  len(jobs),
-                    "platform":      platform,
-                    "job_title":     job_title,
-                    "location":      location,
-                    "max_requested": max_results,
-                },
+        # Run sync Playwright scraper in a thread pool —
+        # this keeps it outside the asyncio event loop entirely.
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            jobs = await loop.run_in_executor(
+                pool, run_scraper, request, max_results
             )
 
-            Actor.log.info("Actor completed: %s jobs scraped", len(jobs))
+        Actor.log.info("Scraper finished: %s jobs found", len(jobs))
 
-        except Exception as exc:
-            Actor.log.exception("Actor failed: %s", str(exc))
-            raise
+        if jobs:
+            await Actor.push_data(jobs)
+
+        await Actor.set_value(
+            "ACTOR_STATS",
+            {
+                "jobs_scraped":  len(jobs),
+                "platform":      platform,
+                "job_title":     job_title,
+                "location":      location,
+                "max_requested": max_results,
+            },
+        )
+
+        Actor.log.info("Actor completed: %s jobs scraped", len(jobs))
 
 
 if __name__ == "__main__":
