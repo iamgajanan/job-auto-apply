@@ -1,32 +1,26 @@
 import os
+import re
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
-
-try:
-    from playwright_stealth import Stealth
-    _STEALTH = Stealth()
-    _STEALTH_AVAILABLE = True
-except ImportError:
-    _STEALTH_AVAILABLE = False
 
 
 class BrowserManager:
     """
     Shared Playwright browser manager.
 
-    LOCAL:
-        Uses persistent browser profiles by default so existing
-        authenticated sessions can be reused.
+    Local/default mode:
+        Uses a persistent browser profile so existing authenticated
+        sessions can be reused.
 
         LinkedIn -> browser-data/
         Naukri   -> browser-data-naukri/
 
-    APIFY / CLOUD:
+    Cloud/Apify mode:
         Set BROWSER_PERSISTENT=false.
 
-        This launches a fresh browser context and does not depend
-        on browser-data directories from the local machine.
+        A fresh Chromium browser/context is created and no local
+        browser profile is required.
     """
 
     USER_AGENT = (
@@ -42,15 +36,6 @@ class BrowserManager:
     ):
         self.profile_name = profile_name
 
-        # Keep existing local behaviour by default.
-        #
-        # Local:
-        #   BROWSER_PERSISTENT is normally not set
-        #   -> persistent=True
-        #
-        # Apify:
-        #   Dockerfile sets BROWSER_PERSISTENT=false
-        #   -> persistent=False
         if persistent is None:
             value = os.getenv(
                 "BROWSER_PERSISTENT",
@@ -70,15 +55,41 @@ class BrowserManager:
         self.context = None
         self.page = None
 
-    def launch(
+    def _build_proxy_config(
         self,
-        headless: bool = True,
-        block_resources: bool = True,
-        proxy_url: str | None = None,
-    ):
-        self.playwright = sync_playwright().start()
+        proxy_url: str | None,
+    ) -> dict | None:
+        """
+        Convert an authenticated proxy URL such as:
 
-        context_options = {
+        http://username:password@host:port
+
+        into the proxy configuration expected by Playwright.
+
+        Credentials are never logged.
+        """
+
+        if not proxy_url:
+            return None
+
+        match = re.match(
+            r"^(https?://)([^:]+):([^@]+)@(.+)$",
+            proxy_url,
+        )
+
+        if match:
+            return {
+                "server": f"{match.group(1)}{match.group(4)}",
+                "username": match.group(2),
+                "password": match.group(3),
+            }
+
+        return {
+            "server": proxy_url,
+        }
+
+    def _context_options(self) -> dict:
+        return {
             "viewport": {
                 "width": 1440,
                 "height": 900,
@@ -91,33 +102,40 @@ class BrowserManager:
             },
         }
 
+    def launch(
+        self,
+        headless: bool = True,
+        block_resources: bool = True,
+        proxy_url: str | None = None,
+    ):
+        self.playwright = sync_playwright().start()
+
+        context_options = self._context_options()
+        proxy_config = self._build_proxy_config(proxy_url)
+
         if self.persistent:
             self._launch_persistent(
                 headless=headless,
                 context_options=context_options,
-                proxy_url=proxy_url,
+                proxy_config=proxy_config,
             )
         else:
             self._launch_ephemeral(
                 headless=headless,
                 context_options=context_options,
-                proxy_url=proxy_url,
+                proxy_config=proxy_config,
             )
 
-        # Keep the existing resource-blocking behaviour.
-        #
-        # Naukri currently calls launch(block_resources=False),
-        # so its stylesheets/fonts/images are still allowed.
         if block_resources:
             self.context.route(
                 "**/*",
                 lambda route: (
                     route.abort()
-                    if route.request.resource_type in {
+                    if route.request.resource_type
+                    in {
                         "image",
                         "font",
                         "media",
-                        "stylesheet",
                     }
                     else route.continue_()
                 ),
@@ -130,7 +148,7 @@ class BrowserManager:
         )
 
         self.page.set_default_timeout(10000)
-        self.page.set_default_navigation_timeout(20000)
+        self.page.set_default_navigation_timeout(30000)
 
         return self.page
 
@@ -138,14 +156,8 @@ class BrowserManager:
         self,
         headless: bool,
         context_options: dict,
-        proxy_url: str | None = None,
+        proxy_config: dict | None,
     ):
-        """
-        Persistent local browser profile.
-
-        This preserves the current local login/session behaviour.
-        """
-
         profile = (
             Path(__file__)
             .resolve()
@@ -160,14 +172,13 @@ class BrowserManager:
             **context_options,
         }
 
-        if proxy_url:
-            launch_options["proxy"] = {
-                "server": proxy_url,
-            }
+        if proxy_config:
+            launch_options["proxy"] = proxy_config
 
         try:
             self.context = (
-                self.playwright.chromium.launch_persistent_context(
+                self.playwright.chromium
+                .launch_persistent_context(
                     channel="chrome",
                     **launch_options,
                 )
@@ -181,7 +192,8 @@ class BrowserManager:
             )
 
             self.context = (
-                self.playwright.chromium.launch_persistent_context(
+                self.playwright.chromium
+                .launch_persistent_context(
                     **launch_options,
                 )
             )
@@ -190,36 +202,21 @@ class BrowserManager:
         self,
         headless: bool,
         context_options: dict,
-        proxy_url: str | None = None,
+        proxy_config: dict | None,
     ):
-        """
-        Fresh browser session.
-
-        Used by the Apify Actor for anonymous/public Naukri access.
-
-        No browser-data or browser-data-naukri directory is required.
-        """
-
         launch_options = {
             "headless": headless,
         }
 
-        if proxy_url:
-            import re
-            m = re.match(r"https?://([^:]+):([^@]+)@(.+)", proxy_url)
-            if m:
-                launch_options["proxy"] = {
-                    "server": f"http://{m.group(3)}",
-                    "username": m.group(1),
-                    "password": m.group(2),
-                }
-            else:
-                launch_options["proxy"] = {"server": proxy_url}
+        if proxy_config:
+            launch_options["proxy"] = proxy_config
 
         try:
-            self.browser = self.playwright.chromium.launch(
-                channel="chrome",
-                **launch_options,
+            self.browser = (
+                self.playwright.chromium.launch(
+                    channel="chrome",
+                    **launch_options,
+                )
             )
 
         except Exception as exc:
@@ -229,30 +226,17 @@ class BrowserManager:
                 exc,
             )
 
-            self.browser = self.playwright.chromium.launch(
-                **launch_options,
+            self.browser = (
+                self.playwright.chromium.launch(
+                    **launch_options,
+                )
             )
 
         self.context = self.browser.new_context(
             **context_options,
         )
 
-        # Apply stealth patches to defeat Akamai/Cloudflare bot detection.
-        # Patches navigator.webdriver, missing Chrome APIs, WebGL fingerprint etc.
-        if _STEALTH_AVAILABLE:
-            _STEALTH.use_sync(self.context)
-
     def close(self):
-        """
-        Close Playwright resources safely.
-
-        Persistent mode:
-            context -> playwright
-
-        Ephemeral mode:
-            context -> browser -> playwright
-        """
-
         if self.context:
             try:
                 self.context.close()
