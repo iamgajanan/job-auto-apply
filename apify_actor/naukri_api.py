@@ -29,12 +29,18 @@ class NaukriAPISearch:
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/126.0.0.0 Safari/537.36"
         ),
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Referer": "https://www.naukri.com/",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.naukri.com/react-developer-jobs-in-pune",
         "Origin": "https://www.naukri.com",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
     }
 
     def _requested_years(self, value) -> Optional[int]:
@@ -139,7 +145,15 @@ class NaukriAPISearch:
         page_no  = 1
         max_pages = max(1, (self.JOB_LIMIT + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
 
-        with httpx.Client(headers=self.HEADERS, timeout=30) as client:
+        # Build dynamic Referer matching the search URL
+        search_slug = request.job_title.lower().replace(" ", "-")
+        loc_slug = request.location.lower().replace(" ", "-")
+        dynamic_headers = {
+            **self.HEADERS,
+            "Referer": f"https://www.naukri.com/{search_slug}-jobs-in-{loc_slug}",
+        }
+
+        with httpx.Client(headers=dynamic_headers, timeout=30) as client:
             while len(jobs) < self.JOB_LIMIT and page_no <= max_pages:
                 params = {
                     "noOfResults": self.PAGE_SIZE,
