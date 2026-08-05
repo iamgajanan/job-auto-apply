@@ -191,7 +191,7 @@ class NaukriSearch(BaseProvider):
                 app_logger.debug(f"Naukri page {page_num + 1} | {url}")
 
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     BlockDetector.check("naukri", page, response)
                 except PlatformAccessError:
                     raise

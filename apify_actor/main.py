@@ -7,35 +7,15 @@ from app.features.jobs.schema import JobSearchRequest
 from app.providers.naukri.search import NaukriSearch
 
 
-# This is the Datacenter proxy group shown as available
-# in your Apify account.
-APIFY_PROXY_GROUP = "BUYPROXIES94952"
-
-
-def run_scraper(
-    request: JobSearchRequest,
-    max_results: int,
-    proxy_url: str,
-) -> list:
+def run_scraper(request: JobSearchRequest, max_results: int) -> list:
     """
     Run synchronous Playwright in a worker thread.
-
-    The Apify Actor runs inside asyncio, while the backend currently
-    uses Playwright's synchronous API.
+    The Apify Actor runs inside asyncio; Playwright sync API
+    can't run inside asyncio — thread executor solves this.
     """
-
     scraper = NaukriSearch()
-
-    # Keep the scrape limited to what the Actor user requested.
     scraper.JOB_LIMIT = max_results
-
-    # Pass the Apify proxy URL into NaukriSearch.
-    #
-    # NaukriSearch already passes PROXY_URL to BrowserManager.launch().
-    scraper.PROXY_URL = proxy_url
-
     jobs = scraper.search(request)
-
     return jobs[:max_results]
 
 
@@ -43,119 +23,36 @@ async def main() -> None:
     async with Actor:
         actor_input = await Actor.get_input() or {}
 
-        # ---------------------------------------------------------
-        # INPUT
-        # ---------------------------------------------------------
-
-        platform = (
-            actor_input
-            .get("platform", "naukri")
-            .strip()
-            .lower()
-        )
-
-        job_title = (
-            actor_input
-            .get("job_title", "")
-            .strip()
-        )
-
-        location = (
-            actor_input
-            .get("location", "")
-            .strip()
-        )
-
-        experience = actor_input.get("experience") or None
-
-        work_mode = (
-            actor_input.get("work_mode", "any")
-            or "any"
-        )
-
-        posted_within = (
-            actor_input.get("posted_within", "any")
-            or "any"
-        )
-
-        try:
-            max_results = int(
-                actor_input.get("maxResults", 10)
-            )
-        except (TypeError, ValueError):
-            max_results = 10
-
-        max_results = min(
-            max(max_results, 1),
-            100,
-        )
-
-        # ---------------------------------------------------------
-        # VALIDATION
-        # ---------------------------------------------------------
+        # ── Required ──────────────────────────────────────────────────
+        platform  = actor_input.get("platform", "naukri").strip().lower()
+        job_title = actor_input.get("job_title", "").strip()
+        location  = actor_input.get("location",  "").strip()
 
         if platform != "naukri":
             raise ValueError(
-                f"Platform '{platform}' is not supported by "
-                "the current cloud Actor. Use platform='naukri'."
+                f"Platform '{platform}' is not supported yet. "
+                "Use platform='naukri'. LinkedIn support is coming soon."
             )
-
         if not job_title:
-            raise ValueError(
-                "job_title is required."
-            )
-
+            raise ValueError("job_title is required.")
         if not location:
-            raise ValueError(
-                "location is required."
-            )
+            raise ValueError("location is required.")
 
-        # ---------------------------------------------------------
-        # START
-        # ---------------------------------------------------------
+        # ── Optional filters ──────────────────────────────────────────
+        experience    = actor_input.get("experience")    or None
+        work_mode     = actor_input.get("work_mode",     "any") or "any"
+        posted_within = actor_input.get("posted_within", "any") or "any"
 
-        Actor.log.info(
-            "Starting Naukri search: %s in %s "
-            "(max %s results)",
-            job_title,
-            location,
-            max_results,
-        )
-
-        # ---------------------------------------------------------
-        # APIFY PROXY
-        # ---------------------------------------------------------
+        try:
+            max_results = int(actor_input.get("maxResults", 10))
+        except (TypeError, ValueError):
+            max_results = 10
+        max_results = min(max(max_results, 1), 100)
 
         Actor.log.info(
-            "Creating Apify proxy configuration using group: %s",
-            APIFY_PROXY_GROUP,
+            "Starting Naukri search: %s in %s (max %s results)",
+            job_title, location, max_results,
         )
-
-        proxy_config = await Actor.create_proxy_configuration(
-            groups=[APIFY_PROXY_GROUP],
-        )
-
-        if proxy_config is None:
-            raise RuntimeError(
-                "Apify proxy configuration could not be created."
-            )
-
-        proxy_url = await proxy_config.new_url()
-
-        if not proxy_url:
-            raise RuntimeError(
-                "Apify proxy URL could not be generated."
-            )
-
-        # Do NOT print proxy_url itself because it can contain
-        # proxy authentication credentials.
-        Actor.log.info(
-            "Apify proxy configured successfully."
-        )
-
-        # ---------------------------------------------------------
-        # BUILD REQUEST
-        # ---------------------------------------------------------
 
         request = JobSearchRequest(
             platform="naukri",
@@ -167,94 +64,44 @@ async def main() -> None:
             posted_within=posted_within,
         )
 
-        # ---------------------------------------------------------
-        # RUN SCRAPER
-        # ---------------------------------------------------------
-
+        # No proxy — Apify's BUYPROXIES94952 datacenter IPs time out on
+        # Naukri. Raw Apify IPs work better. Upgrade to residential proxy
+        # (paid Apify plan) if raw IPs get blocked too.
         try:
             loop = asyncio.get_running_loop()
-
-            with ThreadPoolExecutor(
-                max_workers=1
-            ) as executor:
-
+            with ThreadPoolExecutor(max_workers=1) as executor:
                 jobs = await loop.run_in_executor(
-                    executor,
-                    run_scraper,
-                    request,
-                    max_results,
-                    proxy_url,
+                    executor, run_scraper, request, max_results
                 )
 
-            Actor.log.info(
-                "Naukri scraper finished: %s jobs found",
-                len(jobs),
-            )
-
-            # -----------------------------------------------------
-            # DATASET
-            # -----------------------------------------------------
+            Actor.log.info("Scraper finished: %s jobs found", len(jobs))
 
             if jobs:
                 await Actor.push_data(jobs)
-
-                Actor.log.info(
-                    "Pushed %s jobs to Actor dataset.",
-                    len(jobs),
-                )
-
+                Actor.log.info("Pushed %s jobs to dataset.", len(jobs))
             else:
-                Actor.log.warning(
-                    "Naukri search completed but returned 0 jobs."
-                )
+                Actor.log.warning("Search completed but returned 0 jobs.")
 
-            # -----------------------------------------------------
-            # STATS
-            # -----------------------------------------------------
+            await Actor.set_value("ACTOR_STATS", {
+                "status":        "completed",
+                "platform":      "naukri",
+                "job_title":     job_title,
+                "location":      location,
+                "jobs_scraped":  len(jobs),
+                "max_requested": max_results,
+            })
 
-            await Actor.set_value(
-                "ACTOR_STATS",
-                {
-                    "status": "completed",
-                    "platform": "naukri",
-                    "job_title": job_title,
-                    "location": location,
-                    "jobs_scraped": len(jobs),
-                    "max_requested": max_results,
-                    "proxy_enabled": True,
-                    "proxy_group": APIFY_PROXY_GROUP,
-                    "browser_mode": "ephemeral",
-                },
-            )
-
-            Actor.log.info(
-                "Actor completed successfully: %s jobs scraped.",
-                len(jobs),
-            )
+            Actor.log.info("Actor completed: %s jobs scraped.", len(jobs))
 
         except Exception as exc:
-            Actor.log.exception(
-                "Actor failed while running Naukri scraper: %s",
-                str(exc),
-            )
-
-            try:
-                await Actor.set_value(
-                    "ACTOR_STATS",
-                    {
-                        "status": "failed",
-                        "platform": "naukri",
-                        "job_title": job_title,
-                        "location": location,
-                        "jobs_scraped": 0,
-                        "proxy_enabled": True,
-                        "proxy_group": APIFY_PROXY_GROUP,
-                        "error": str(exc),
-                    },
-                )
-            except Exception:
-                pass
-
+            Actor.log.exception("Actor failed: %s", str(exc))
+            await Actor.set_value("ACTOR_STATS", {
+                "status":    "failed",
+                "platform":  "naukri",
+                "job_title": job_title,
+                "location":  location,
+                "error":     str(exc),
+            })
             raise
 
 
