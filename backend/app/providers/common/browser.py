@@ -198,9 +198,19 @@ class BrowserManager:
         }
 
         if proxy_url:
-            launch_options["proxy"] = {
-                "server": proxy_url,
-            }
+            # Playwright needs proxy auth split out separately
+            # "http://user:pass@host:port" format doesn't work reliably
+            # Must use server + username + password fields
+            import re
+            m = re.match(r"https?://([^:]+):([^@]+)@(.+)", proxy_url)
+            if m:
+                launch_options["proxy"] = {
+                    "server": f"http://{m.group(3)}",
+                    "username": m.group(1),
+                    "password": m.group(2),
+                }
+            else:
+                launch_options["proxy"] = {"server": proxy_url}
 
         try:
             self.browser = self.playwright.chromium.launch(
@@ -256,4 +266,3 @@ class BrowserManager:
         self.context = None
         self.browser = None
         self.playwright = None
-
