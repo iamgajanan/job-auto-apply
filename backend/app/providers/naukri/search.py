@@ -174,6 +174,19 @@ class NaukriSearch(BaseProvider):
         try:
             page = browser.launch(block_resources=False, proxy_url=self.PROXY_URL)
 
+            # ── Proxy diagnostic (only when proxy is configured) ─────
+            if self.PROXY_URL:
+                try:
+                    ip_response = page.goto(
+                        "https://ipv4.webshare.io/",
+                        wait_until="domcontentloaded",
+                        timeout=15000,
+                    )
+                    ip_text = page.locator("body").inner_text(timeout=3000).strip()
+                    app_logger.info(f"Proxy IP check: status={ip_response.status if ip_response else '?'} ip={ip_text}")
+                except Exception as e:
+                    app_logger.warning(f"Proxy IP check failed: {e} — continuing anyway")
+
             keyword_slug = self._slugify(request.job_title)
             location_slug = self._slugify(request.location)
 
@@ -191,7 +204,7 @@ class NaukriSearch(BaseProvider):
                 app_logger.debug(f"Naukri page {page_num + 1} | {url}")
 
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     BlockDetector.check("naukri", page, response)
                 except PlatformAccessError:
                     raise
