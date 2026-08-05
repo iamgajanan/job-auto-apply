@@ -9,7 +9,9 @@ from app.providers.naukri.search import NaukriSearch
 
 # Webshare rotating residential proxy
 # Routes through real residential IPs — bypasses Naukri's Akamai block
-PROXY_URL = "http://nvwsanen-rotate:2hdb4hzilfe3@p.webshare.io:80"
+# Webshare Rotating Residential — India endpoint
+# Get exact URL from: Webshare Dashboard → Rotating Residential → Endpoint Generator → Country: India
+PROXY_URL = "http://nvwsanen-in-rotate:2hdb4hzilfe3@p.webshare.io:80"
 
 
 def run_scraper(request: JobSearchRequest, max_results: int) -> list:

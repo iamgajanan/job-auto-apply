@@ -187,6 +187,9 @@ class NaukriSearch(BaseProvider):
                 except Exception as e:
                     app_logger.warning(f"Proxy IP check failed: {e} — continuing anyway")
 
+            # ── Retry wrapper for 403 (rotate proxy IP and retry once) ──
+            self._max_403_retries = getattr(self, "_max_403_retries", 2)
+
             keyword_slug = self._slugify(request.job_title)
             location_slug = self._slugify(request.location)
 
