@@ -153,7 +153,9 @@ class NaukriAPISearch:
             "Referer": f"https://www.naukri.com/{search_slug}-jobs-in-{loc_slug}",
         }
 
-        with httpx.Client(headers=dynamic_headers, timeout=30) as client:
+        proxy_url = "http://nvwsanen-rotate:2hdb4hzilfe3@p.webshare.io:80/"
+
+        with httpx.Client(headers=dynamic_headers, timeout=30, proxy=proxy_url) as client:
             while len(jobs) < self.JOB_LIMIT and page_no <= max_pages:
                 params = {
                     "noOfResults": self.PAGE_SIZE,
