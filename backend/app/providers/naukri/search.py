@@ -207,13 +207,33 @@ class NaukriSearch(BaseProvider):
                 app_logger.debug(f"Naukri page {page_num + 1} | {url}")
 
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    BlockDetector.check("naukri", page, response)
-                except PlatformAccessError:
-                    raise
-                except Exception as e:
-                    app_logger.warning(f"Naukri navigation failed: {e}")
-                    raise
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                except Exception as nav_err:
+                    app_logger.warning(f"Naukri navigation failed: {nav_err}")
+                    break
+
+                status = getattr(response, "status", None)
+                app_logger.info(f"Page {page_num + 1} HTTP status: {status}")
+
+                # Dump page content for diagnosis on first page
+                if page_num == 0:
+                    try:
+                        title = page.title()
+                        html_preview = page.content()[:800]
+                        app_logger.info(f"Page title: {title!r}")
+                        app_logger.info(f"HTML preview: {html_preview!r}")
+                    except Exception as e:
+                        app_logger.warning(f"Could not read page content: {e}")
+
+                # Soft-handle 403 — log and stop rather than crash
+                if status == 403:
+                    app_logger.warning(
+                        f"Naukri returned 403 on page {page_num + 1} — "
+                        f"Akamai bot detection. Stopping scrape gracefully."
+                    )
+                    break
+
+                BlockDetector.check("naukri", page, response)
 
                 Humanizer.think(page)
 
