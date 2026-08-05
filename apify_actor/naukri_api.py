@@ -26,6 +26,7 @@ class NaukriAPISearch:
     HEADERS = {
         "appid": "109",
         "systemid": "Naukri",
+        "clientid": "d3skt0p",
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -33,7 +34,6 @@ class NaukriAPISearch:
         ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.naukri.com/react-developer-jobs-in-pune",
         "Origin": "https://www.naukri.com",
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
@@ -172,7 +172,11 @@ class NaukriAPISearch:
                 try:
                     r = client.get(self.API_URL, params=params)
                     if r.status_code != 200:
-                        app_logger.warning(f"Naukri API returned {r.status_code} on page {page_no}")
+                        app_logger.warning(
+                            f"Naukri API returned {r.status_code} on page {page_no} | "
+                            f"headers={dict(r.headers)} | "
+                            f"body={r.text[:500]!r}"
+                        )
                         break
                     data = r.json()
                 except Exception as e:
