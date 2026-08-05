@@ -7,21 +7,32 @@ from app.features.jobs.schema import JobSearchRequest
 from app.providers.naukri.search import NaukriSearch
 
 
+# This is the Datacenter proxy group shown as available
+# in your Apify account.
+APIFY_PROXY_GROUP = "BUYPROXIES94952"
+
+
 def run_scraper(
     request: JobSearchRequest,
     max_results: int,
+    proxy_url: str,
 ) -> list:
     """
-    Run the synchronous Playwright scraper in its own worker thread.
+    Run synchronous Playwright in a worker thread.
 
-    The Apify Actor itself runs inside an asyncio event loop,
-    while the backend currently uses Playwright's synchronous API.
+    The Apify Actor runs inside asyncio, while the backend currently
+    uses Playwright's synchronous API.
     """
 
     scraper = NaukriSearch()
 
-    # Respect the Actor input and avoid scraping more jobs than needed.
+    # Keep the scrape limited to what the Actor user requested.
     scraper.JOB_LIMIT = max_results
+
+    # Pass the Apify proxy URL into NaukriSearch.
+    #
+    # NaukriSearch already passes PROXY_URL to BrowserManager.launch().
+    scraper.PROXY_URL = proxy_url
 
     jobs = scraper.search(request)
 
@@ -85,9 +96,8 @@ async def main() -> None:
 
         if platform != "naukri":
             raise ValueError(
-                f"Platform '{platform}' is not supported by the "
-                "current cloud Actor. "
-                "Use platform='naukri'."
+                f"Platform '{platform}' is not supported by "
+                "the current cloud Actor. Use platform='naukri'."
             )
 
         if not job_title:
@@ -112,24 +122,39 @@ async def main() -> None:
             max_results,
         )
 
-        # IMPORTANT:
-        #
-        # We intentionally do NOT call:
-        #
-        # Actor.create_proxy_configuration(
-        #     groups=["DATACENTER"]
-        # )
-        #
-        # The previous Actor crashed here because the Apify account
-        # does not currently have access to that proxy group.
-        #
-        # First we test Naukri's public job-search pages directly.
+        # ---------------------------------------------------------
+        # APIFY PROXY
+        # ---------------------------------------------------------
+
         Actor.log.info(
-            "Running initial Naukri test without Apify proxy."
+            "Creating Apify proxy configuration using group: %s",
+            APIFY_PROXY_GROUP,
+        )
+
+        proxy_config = await Actor.create_proxy_configuration(
+            groups=[APIFY_PROXY_GROUP],
+        )
+
+        if proxy_config is None:
+            raise RuntimeError(
+                "Apify proxy configuration could not be created."
+            )
+
+        proxy_url = await proxy_config.new_url()
+
+        if not proxy_url:
+            raise RuntimeError(
+                "Apify proxy URL could not be generated."
+            )
+
+        # Do NOT print proxy_url itself because it can contain
+        # proxy authentication credentials.
+        Actor.log.info(
+            "Apify proxy configured successfully."
         )
 
         # ---------------------------------------------------------
-        # BUILD BACKEND REQUEST
+        # BUILD REQUEST
         # ---------------------------------------------------------
 
         request = JobSearchRequest(
@@ -149,10 +174,6 @@ async def main() -> None:
         try:
             loop = asyncio.get_running_loop()
 
-            # Playwright sync API cannot run directly inside the
-            # Actor's asyncio event loop.
-            #
-            # Run it in one worker thread instead.
             with ThreadPoolExecutor(
                 max_workers=1
             ) as executor:
@@ -162,6 +183,7 @@ async def main() -> None:
                     run_scraper,
                     request,
                     max_results,
+                    proxy_url,
                 )
 
             Actor.log.info(
@@ -180,13 +202,14 @@ async def main() -> None:
                     "Pushed %s jobs to Actor dataset.",
                     len(jobs),
                 )
+
             else:
                 Actor.log.warning(
                     "Naukri search completed but returned 0 jobs."
                 )
 
             # -----------------------------------------------------
-            # ACTOR STATS
+            # STATS
             # -----------------------------------------------------
 
             await Actor.set_value(
@@ -198,7 +221,8 @@ async def main() -> None:
                     "location": location,
                     "jobs_scraped": len(jobs),
                     "max_requested": max_results,
-                    "proxy_enabled": False,
+                    "proxy_enabled": True,
+                    "proxy_group": APIFY_PROXY_GROUP,
                     "browser_mode": "ephemeral",
                 },
             )
@@ -223,6 +247,8 @@ async def main() -> None:
                         "job_title": job_title,
                         "location": location,
                         "jobs_scraped": 0,
+                        "proxy_enabled": True,
+                        "proxy_group": APIFY_PROXY_GROUP,
                         "error": str(exc),
                     },
                 )
