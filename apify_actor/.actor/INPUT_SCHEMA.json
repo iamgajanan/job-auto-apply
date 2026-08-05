@@ -5,16 +5,18 @@
   "properties": {
     "platform": {
       "title": "Job Platform",
-      "description": "Platform to scrape. Currently 'naukri' is supported. LinkedIn coming soon.",
+      "description": "Platform to scrape. Currently only 'naukri' is supported. LinkedIn coming soon.",
       "type": "string",
+      "editor": "select",
       "enum": ["naukri"],
       "default": "naukri",
       "example": "naukri"
     },
     "job_title": {
       "title": "Job Title / Keyword",
-      "description": "Job title or keywords to search for (e.g., 'React Developer', 'Python Engineer', 'Data Scientist')",
+      "description": "Job title or keywords to search for (e.g., 'React Developer', 'Python Engineer')",
       "type": "string",
+      "editor": "textfield",
       "minLength": 1,
       "maxLength": 100,
       "example": "React Developer"
@@ -23,14 +25,16 @@
       "title": "Location",
       "description": "City or region to search in (e.g., 'Pune', 'Bangalore', 'Mumbai', 'India')",
       "type": "string",
+      "editor": "textfield",
       "minLength": 1,
       "maxLength": 100,
       "example": "Pune"
     },
     "experience": {
       "title": "Experience Level",
-      "description": "Required experience (e.g., '2 years', '5 years', '8 years'). Leave blank to return all levels.",
+      "description": "Required experience (e.g., '2 years', '5 years'). Leave blank for any level.",
       "type": "string",
+      "editor": "textfield",
       "maxLength": 50,
       "example": "3 years"
     },
@@ -38,6 +42,7 @@
       "title": "Work Mode",
       "description": "Type of work arrangement",
       "type": "string",
+      "editor": "select",
       "enum": ["remote", "hybrid", "onsite", "any"],
       "default": "any",
       "example": "remote"
@@ -46,14 +51,16 @@
       "title": "Posted Within",
       "description": "How recently the job was posted",
       "type": "string",
+      "editor": "select",
       "enum": ["day", "week", "month", "any"],
       "default": "any",
       "example": "week"
     },
     "maxResults": {
       "title": "Maximum Results",
-      "description": "Maximum number of jobs to return (1–100 per run)",
+      "description": "Maximum number of jobs to return (1-100 per run)",
       "type": "integer",
+      "editor": "number",
       "minimum": 1,
       "maximum": 100,
       "default": 100,
