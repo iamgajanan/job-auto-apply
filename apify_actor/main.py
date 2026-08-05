@@ -1,13 +1,32 @@
 import asyncio
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 from apify import Actor
 
 from app.features.jobs.schema import JobSearchRequest
-from app.providers.naukri_api import NaukriAPISearch
+from app.providers.naukri.search import NaukriSearch
+
+# Webshare rotating residential proxy
+# Routes through real residential IPs — bypasses Naukri's Akamai block
+PROXY_URL = "http://nvwsanen-rotate:2hdb4hzilfe3@p.webshare.io:80"
+
+
+def run_scraper(request: JobSearchRequest, max_results: int) -> list:
+    """
+    Runs sync Playwright scraper in a thread (outside asyncio loop).
+    Uses Webshare residential proxy so Naukri sees a real home IP.
+    """
+    scraper = NaukriSearch()
+    scraper.JOB_LIMIT = max_results
+    scraper.PROXY_URL = PROXY_URL
+    jobs = scraper.search(request)
+    return jobs[:max_results]
 
 
 async def main() -> None:
     async with Actor:
+
         actor_input = await Actor.get_input() or {}
 
         # ── Required ──────────────────────────────────────────────────
@@ -37,7 +56,7 @@ async def main() -> None:
         max_results = min(max(max_results, 1), 100)
 
         Actor.log.info(
-            "Starting Naukri API search: %s in %s (max %s)",
+            "Starting Naukri search: %s in %s (max %s) via residential proxy",
             job_title, location, max_results,
         )
 
@@ -51,41 +70,30 @@ async def main() -> None:
             posted_within=posted_within,
         )
 
-        # NaukriAPISearch uses httpx (pure HTTP) — no browser, no Akamai,
-        # no 403. Works from any IP including Apify's cloud containers.
-        scraper = NaukriAPISearch()
-        scraper.JOB_LIMIT = max_results
+        loop = asyncio.get_running_loop()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            jobs = await loop.run_in_executor(
+                executor, run_scraper, request, max_results
+            )
 
-        try:
-            jobs = scraper.search(request)
+        Actor.log.info("Scraper finished: %s jobs found", len(jobs))
 
-            Actor.log.info("Search finished: %s jobs found", len(jobs))
+        if jobs:
+            await Actor.push_data(jobs)
+        else:
+            Actor.log.warning("Search returned 0 jobs.")
 
-            if jobs:
-                await Actor.push_data(jobs)
-            else:
-                Actor.log.warning("Search returned 0 jobs.")
+        await Actor.set_value("ACTOR_STATS", {
+            "status":        "completed",
+            "platform":      "naukri",
+            "job_title":     job_title,
+            "location":      location,
+            "jobs_scraped":  len(jobs),
+            "max_requested": max_results,
+            "proxy":         "webshare-residential",
+        })
 
-            await Actor.set_value("ACTOR_STATS", {
-                "status":        "completed",
-                "platform":      "naukri",
-                "job_title":     job_title,
-                "location":      location,
-                "jobs_scraped":  len(jobs),
-                "max_requested": max_results,
-                "method":        "api",
-            })
-
-            Actor.log.info("Actor completed: %s jobs", len(jobs))
-
-        except Exception as exc:
-            Actor.log.exception("Actor failed: %s", str(exc))
-            await Actor.set_value("ACTOR_STATS", {
-                "status":   "failed",
-                "error":    str(exc),
-                "platform": "naukri",
-            })
-            raise
+        Actor.log.info("Actor completed: %s jobs", len(jobs))
 
 
 if __name__ == "__main__":
