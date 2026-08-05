@@ -3,6 +3,13 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+try:
+    from playwright_stealth import Stealth
+    _STEALTH = Stealth()
+    _STEALTH_AVAILABLE = True
+except ImportError:
+    _STEALTH_AVAILABLE = False
+
 
 class BrowserManager:
     """
@@ -229,6 +236,11 @@ class BrowserManager:
         self.context = self.browser.new_context(
             **context_options,
         )
+
+        # Apply stealth patches to defeat Akamai/Cloudflare bot detection.
+        # Patches navigator.webdriver, missing Chrome APIs, WebGL fingerprint etc.
+        if _STEALTH_AVAILABLE:
+            _STEALTH.use_sync(self.context)
 
     def close(self):
         """

@@ -3,6 +3,7 @@ apify
 
 # Browser scraping
 playwright==1.60.0
+playwright-stealth
 
 # Data / validation
 pydantic==2.13.4
