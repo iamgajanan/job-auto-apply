@@ -56,12 +56,11 @@ async def main() -> None:
         # ── Apify residential proxy ───────────────────────────────────
         # Routes requests through residential IPs to avoid 403 blocks
         proxy_config = await Actor.create_proxy_configuration(
-            groups=["RESIDENTIAL"],
-            country_code="IN",   # Indian residential IP (Naukri is India-focused)
+            groups=["DATACENTER"],
         )
         proxy_url = await proxy_config.new_url() if proxy_config else None
         if proxy_url:
-            Actor.log.info("Using residential proxy (IN)")
+            Actor.log.info("Using datacenter proxy: %s", proxy_url)
         else:
             Actor.log.warning("No proxy available — may get blocked by Naukri")
 

@@ -1,6 +1,6 @@
 {
   "actorSpecification": 1,
-  "name": "naukri-linkedin-job-scraper",
+  "name": "naukri-linkedin-scraper",
   "title": "Naukri & LinkedIn Job Scraper",
   "description": "Scrapes job listings from Naukri with filters for location, experience, work mode, and posting date. LinkedIn support coming soon.",
   "version": "1.0",
