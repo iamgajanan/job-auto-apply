@@ -41,7 +41,8 @@ class NaukriSearch(BaseProvider):
     )
 
     JOB_LIMIT = 100
-    PAGE_SIZE = 20          # Naukri's approx cards-per-page
+    PAGE_SIZE = 20
+    PROXY_URL = None   # set by actor when running on Apify
     MAX_PAGES = 6
     POST_NAV_WAIT_MS = 2500
 
@@ -171,7 +172,7 @@ class NaukriSearch(BaseProvider):
         # font, or image as a strong bot signal. Loading everything
         # like a real browser matters more here than scrape speed.
         try:
-            page = browser.launch(block_resources=False)
+            page = browser.launch(block_resources=False, proxy_url=self.PROXY_URL)
 
             keyword_slug = self._slugify(request.job_title)
             location_slug = self._slugify(request.location)

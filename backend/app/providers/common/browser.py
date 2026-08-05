@@ -39,7 +39,7 @@ class BrowserManager:
         self.context = None
         self.page = None
 
-    def launch(self, headless: bool = True, block_resources: bool = True):
+    def launch(self, headless: bool = True, block_resources: bool = True, proxy_url: str = None):
 
         profile = (
             Path(__file__)
@@ -65,6 +65,9 @@ class BrowserManager:
                 "Accept-Language": "en-US,en;q=0.9",
             },
         )
+
+        if proxy_url:
+            launch_kwargs["proxy"] = {"server": proxy_url}
 
         try:
             # Prefer the real, installed Chrome build over bundled

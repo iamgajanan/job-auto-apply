@@ -1,19 +1,23 @@
 import asyncio
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 from apify import Actor
+from apify_client import ApifyClient
 
 from app.features.jobs.schema import JobSearchRequest
 from app.providers.naukri.search import NaukriSearch
 
 
-def run_scraper(request: JobSearchRequest, max_results: int) -> list:
+def run_scraper(request: JobSearchRequest, max_results: int, proxy_url: str = None) -> list:
     """
     Runs the sync Playwright scraper in a plain thread,
     completely outside the asyncio event loop.
     """
     scraper = NaukriSearch()
     scraper.JOB_LIMIT = max_results
+    if proxy_url:
+        scraper.PROXY_URL = proxy_url
     jobs = scraper.search(request)
     return jobs[:max_results]
 
@@ -49,6 +53,18 @@ async def main() -> None:
             job_title, location, max_results,
         )
 
+        # ── Apify residential proxy ───────────────────────────────────
+        # Routes requests through residential IPs to avoid 403 blocks
+        proxy_config = await Actor.create_proxy_configuration(
+            groups=["RESIDENTIAL"],
+            country_code="IN",   # Indian residential IP (Naukri is India-focused)
+        )
+        proxy_url = await proxy_config.new_url() if proxy_config else None
+        if proxy_url:
+            Actor.log.info("Using residential proxy (IN)")
+        else:
+            Actor.log.warning("No proxy available — may get blocked by Naukri")
+
         request = JobSearchRequest(
             platform=platform,
             job_title=job_title,
@@ -59,12 +75,11 @@ async def main() -> None:
             posted_within=posted_within,
         )
 
-        # Run sync Playwright scraper in a thread pool —
-        # this keeps it outside the asyncio event loop entirely.
+        # Run sync Playwright scraper in a thread pool
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=1) as pool:
             jobs = await loop.run_in_executor(
-                pool, run_scraper, request, max_results
+                pool, run_scraper, request, max_results, proxy_url
             )
 
         Actor.log.info("Scraper finished: %s jobs found", len(jobs))
