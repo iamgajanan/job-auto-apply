@@ -1,30 +1,25 @@
+import os
 from pathlib import Path
+
 from playwright.sync_api import sync_playwright
 
 
 class BrowserManager:
     """
-    Thin wrapper around a Playwright persistent context.
+    Shared Playwright browser manager.
 
-    profile_name controls WHICH on-disk browser-data folder is used.
-    Each site that needs its own logged-in session (LinkedIn, Naukri, ...)
-    should use its own profile_name so:
-      - their cookies/session never mix
-      - two providers can safely launch a browser in parallel
-        (e.g. two Celery workers running at once) without fighting
-        over the same locked profile directory.
+    LOCAL:
+        Uses persistent browser profiles by default so existing
+        authenticated sessions can be reused.
 
-    headless=False is only needed for the one-time interactive login
-    scripts (login_once.py / login_naukri_once.py) where a human has
-    to actually see the page and type credentials/OTP. Regular scraping
-    runs headless=True by default.
+        LinkedIn -> browser-data/
+        Naukri   -> browser-data-naukri/
 
-    block_resources=True (the LinkedIn-tuned default) aborts
-    images/fonts/media/stylesheets for speed. Some sites sit behind
-    bot-management edges (Akamai, Cloudflare, etc.) that treat a page
-    that never requests a stylesheet or a font as a strong bot signal
-    -- for those, pass block_resources=False so the page loads like a
-    normal browser would, at the cost of being slower.
+    APIFY / CLOUD:
+        Set BROWSER_PERSISTENT=false.
+
+        This launches a fresh browser context and does not depend
+        on browser-data directories from the local machine.
     """
 
     USER_AGENT = (
@@ -33,69 +28,90 @@ class BrowserManager:
         "Chrome/124.0.0.0 Safari/537.36"
     )
 
-    def __init__(self, profile_name: str = "browser-data"):
+    def __init__(
+        self,
+        profile_name: str = "browser-data",
+        persistent: bool | None = None,
+    ):
         self.profile_name = profile_name
+
+        # Keep existing local behaviour by default.
+        #
+        # Local:
+        #   BROWSER_PERSISTENT is normally not set
+        #   -> persistent=True
+        #
+        # Apify:
+        #   Dockerfile sets BROWSER_PERSISTENT=false
+        #   -> persistent=False
+        if persistent is None:
+            value = os.getenv(
+                "BROWSER_PERSISTENT",
+                "true",
+            ).strip().lower()
+
+            persistent = value not in {
+                "false",
+                "0",
+                "no",
+            }
+
+        self.persistent = persistent
+
         self.playwright = None
+        self.browser = None
         self.context = None
         self.page = None
 
-    def launch(self, headless: bool = True, block_resources: bool = True, proxy_url: str = None):
-
-        profile = (
-            Path(__file__)
-            .resolve()
-            .parents[3]
-            / self.profile_name
-        )
-
+    def launch(
+        self,
+        headless: bool = True,
+        block_resources: bool = True,
+        proxy_url: str | None = None,
+    ):
         self.playwright = sync_playwright().start()
 
-        launch_kwargs = dict(
-            user_data_dir=str(profile),
-            headless=headless,
-            slow_mo=0,
-            viewport={
+        context_options = {
+            "viewport": {
                 "width": 1440,
                 "height": 900,
             },
-            locale="en-US",
-            timezone_id="Asia/Kolkata",
-            user_agent=self.USER_AGENT,
-            extra_http_headers={
+            "locale": "en-US",
+            "timezone_id": "Asia/Kolkata",
+            "user_agent": self.USER_AGENT,
+            "extra_http_headers": {
                 "Accept-Language": "en-US,en;q=0.9",
             },
-        )
+        }
 
-        if proxy_url:
-            launch_kwargs["proxy"] = {"server": proxy_url}
-
-        try:
-            # Prefer the real, installed Chrome build over bundled
-            # Chromium -- it presents a normal Chrome fingerprint
-            # (build id, plugin list, etc.) instead of the generic
-            # headless-Chromium one that bot-management products
-            # specifically look for.
-            self.context = self.playwright.chromium.launch_persistent_context(
-                channel="chrome",
-                **launch_kwargs,
+        if self.persistent:
+            self._launch_persistent(
+                headless=headless,
+                context_options=context_options,
+                proxy_url=proxy_url,
             )
-        except Exception as e:
-            print("No system Chrome found, falling back to bundled Chromium:", e)
-            self.context = self.playwright.chromium.launch_persistent_context(
-                **launch_kwargs,
+        else:
+            self._launch_ephemeral(
+                headless=headless,
+                context_options=context_options,
+                proxy_url=proxy_url,
             )
 
+        # Keep the existing resource-blocking behaviour.
+        #
+        # Naukri currently calls launch(block_resources=False),
+        # so its stylesheets/fonts/images are still allowed.
         if block_resources:
             self.context.route(
                 "**/*",
                 lambda route: (
                     route.abort()
-                    if route.request.resource_type in [
+                    if route.request.resource_type in {
                         "image",
                         "font",
                         "media",
                         "stylesheet",
-                    ]
+                    }
                     else route.continue_()
                 ),
             )
@@ -106,22 +122,138 @@ class BrowserManager:
             else self.context.new_page()
         )
 
-        # Best-effort: patch the single most commonly checked automation
-        # flag. This alone will NOT get past serious bot-management (they
-        # fingerprint far more than this), but it's free and harmless.
-        self.page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
-
         self.page.set_default_timeout(10000)
         self.page.set_default_navigation_timeout(20000)
 
         return self.page
 
+    def _launch_persistent(
+        self,
+        headless: bool,
+        context_options: dict,
+        proxy_url: str | None = None,
+    ):
+        """
+        Persistent local browser profile.
+
+        This preserves the current local login/session behaviour.
+        """
+
+        profile = (
+            Path(__file__)
+            .resolve()
+            .parents[3]
+            / self.profile_name
+        )
+
+        launch_options = {
+            "user_data_dir": str(profile),
+            "headless": headless,
+            "slow_mo": 0,
+            **context_options,
+        }
+
+        if proxy_url:
+            launch_options["proxy"] = {
+                "server": proxy_url,
+            }
+
+        try:
+            self.context = (
+                self.playwright.chromium.launch_persistent_context(
+                    channel="chrome",
+                    **launch_options,
+                )
+            )
+
+        except Exception as exc:
+            print(
+                "System Chrome unavailable; "
+                "falling back to Playwright Chromium:",
+                exc,
+            )
+
+            self.context = (
+                self.playwright.chromium.launch_persistent_context(
+                    **launch_options,
+                )
+            )
+
+    def _launch_ephemeral(
+        self,
+        headless: bool,
+        context_options: dict,
+        proxy_url: str | None = None,
+    ):
+        """
+        Fresh browser session.
+
+        Used by the Apify Actor for anonymous/public Naukri access.
+
+        No browser-data or browser-data-naukri directory is required.
+        """
+
+        launch_options = {
+            "headless": headless,
+        }
+
+        if proxy_url:
+            launch_options["proxy"] = {
+                "server": proxy_url,
+            }
+
+        try:
+            self.browser = self.playwright.chromium.launch(
+                channel="chrome",
+                **launch_options,
+            )
+
+        except Exception as exc:
+            print(
+                "System Chrome unavailable; "
+                "falling back to Playwright Chromium:",
+                exc,
+            )
+
+            self.browser = self.playwright.chromium.launch(
+                **launch_options,
+            )
+
+        self.context = self.browser.new_context(
+            **context_options,
+        )
+
     def close(self):
+        """
+        Close Playwright resources safely.
+
+        Persistent mode:
+            context -> playwright
+
+        Ephemeral mode:
+            context -> browser -> playwright
+        """
 
         if self.context:
-            self.context.close()
+            try:
+                self.context.close()
+            except Exception:
+                pass
+
+        if self.browser:
+            try:
+                self.browser.close()
+            except Exception:
+                pass
 
         if self.playwright:
-            self.playwright.stop()
+            try:
+                self.playwright.stop()
+            except Exception:
+                pass
+
+        self.page = None
+        self.context = None
+        self.browser = None
+        self.playwright = None
+
