@@ -1,15 +1,15 @@
 {
-  "title": "Job Scraper Input",
+  "title": "Naukri Job Scraper Input",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
     "platform": {
       "title": "Job Platform",
-      "description": "Which job platform to scrape: 'linkedin' or 'naukri'",
+      "description": "Platform to scrape. Currently 'naukri' is supported. LinkedIn coming soon.",
       "type": "string",
-      "enum": ["linkedin", "naukri"],
-      "default": "linkedin",
-      "example": "linkedin"
+      "enum": ["naukri"],
+      "default": "naukri",
+      "example": "naukri"
     },
     "job_title": {
       "title": "Job Title / Keyword",
@@ -21,15 +21,15 @@
     },
     "location": {
       "title": "Location",
-      "description": "City or region to search in (e.g., 'San Francisco', 'New York', 'Remote', 'India')",
+      "description": "City or region to search in (e.g., 'Pune', 'Bangalore', 'Mumbai', 'India')",
       "type": "string",
       "minLength": 1,
       "maxLength": 100,
-      "example": "San Francisco"
+      "example": "Pune"
     },
     "experience": {
       "title": "Experience Level",
-      "description": "Required experience (e.g., '2 years', '5+ years', 'Entry Level'). Leave blank for any level.",
+      "description": "Required experience (e.g., '2 years', '5 years', '8 years'). Leave blank to return all levels.",
       "type": "string",
       "maxLength": 50,
       "example": "3 years"
@@ -42,16 +42,9 @@
       "default": "any",
       "example": "remote"
     },
-    "easy_apply": {
-      "title": "Easy Apply Only",
-      "description": "LinkedIn only: Return only jobs with easy apply option",
-      "type": "boolean",
-      "default": false,
-      "example": false
-    },
     "posted_within": {
       "title": "Posted Within",
-      "description": "Job posting recency filter",
+      "description": "How recently the job was posted",
       "type": "string",
       "enum": ["day", "week", "month", "any"],
       "default": "any",
@@ -59,7 +52,7 @@
     },
     "maxResults": {
       "title": "Maximum Results",
-      "description": "Maximum number of jobs to return (100 max per run)",
+      "description": "Maximum number of jobs to return (1–100 per run)",
       "type": "integer",
       "minimum": 1,
       "maximum": 100,
@@ -67,5 +60,5 @@
       "example": 50
     }
   },
-  "required": ["platform", "job_title", "location"]
+  "required": ["job_title", "location"]
 }

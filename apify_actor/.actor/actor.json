@@ -1,7 +1,8 @@
 {
   "actorSpecification": 1,
-  "name": "job-scraper-linkedin-naukri",
-  "title": "LinkedIn & Naukri Job Scraper",
+  "name": "naukri-linkedin-job-scraper",
+  "title": "Naukri & LinkedIn Job Scraper",
+  "description": "Scrapes job listings from Naukri with filters for location, experience, work mode, and posting date. LinkedIn support coming soon.",
   "version": "1.0",
   "buildTag": "latest",
   "dockerfile": "../Dockerfile",
@@ -9,5 +10,6 @@
   "input": "./INPUT_SCHEMA.json",
   "readme": "../README.md",
   "minMemoryMbytes": 1024,
-  "maxMemoryMbytes": 4096
+  "maxMemoryMbytes": 4096,
+  "timeoutSecs": 300
 }

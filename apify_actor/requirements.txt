@@ -1,0 +1,19 @@
+# Scraping
+playwright==1.60.0
+
+# Apify SDK
+apify
+
+# Data / validation
+pydantic==2.13.4
+pydantic-settings==2.11.0
+pydantic_core==2.46.4
+python-dotenv==1.2.1
+
+# Logging
+loguru==0.7.3
+
+# Utilities
+anyio==4.12.1
+typing_extensions==4.16.0
+annotated-types==0.7.0
