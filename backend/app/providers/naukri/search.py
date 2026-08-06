@@ -8,6 +8,7 @@ from app.gateway.block_detector import BlockDetector, PlatformAccessError
 from app.core.logger import app_logger
 
 from app.providers.base import BaseProvider, ProviderCapabilities
+from app.config.settings import settings
 
 NAUKRI_PROFILE = "browser-data-naukri"
 
@@ -41,6 +42,7 @@ class NaukriSearch(BaseProvider):
     )
 
     JOB_LIMIT = 100
+    PROXY_URL = settings.SCRAPER_PROXY_URL or None  # from .env, or set externally by Apify actor
     PAGE_SIZE = 20          # Naukri's approx cards-per-page
     MAX_PAGES = 6
     POST_NAV_WAIT_MS = 2500
@@ -154,14 +156,23 @@ class NaukriSearch(BaseProvider):
         return "Unknown"
 
     def _work_mode_matches(self, actual: str, request) -> bool:
-        requested = (request.work_mode or "").strip().lower()
-        if request.remote is True:
-            requested = "remote"
+        requested = (request.work_mode or "any").strip().lower()
         if requested in {"", "any", "all"}:
             return True
         aliases = {"onsite": "on-site", "on site": "on-site"}
         requested = aliases.get(requested, requested)
-        return actual.lower() == requested
+
+        actual_lower = actual.lower()
+
+        # Naukri almost never labels a card "on-site" explicitly -- it's
+        # the unstated default. Only Remote/Hybrid jobs bother to say so.
+        # A card with no explicit work-mode text ("Unknown") is therefore
+        # treated as on-site-compatible, or this filter would return
+        # near-zero results for the majority real-world case.
+        if requested == "on-site" and actual_lower == "unknown":
+            return True
+
+        return actual_lower == requested
 
     def search(self, request):
 
@@ -170,8 +181,14 @@ class NaukriSearch(BaseProvider):
         # management, which flags pages that never load a stylesheet,
         # font, or image as a strong bot signal. Loading everything
         # like a real browser matters more here than scrape speed.
+        if self.PROXY_URL:
+            masked = self.PROXY_URL.split("@")[-1]  # hide credentials in logs
+            app_logger.info(f"Naukri scraping via PROXY: {masked}")
+        else:
+            app_logger.info("Naukri scraping via DIRECT connection (no proxy)")
+
         try:
-            page = browser.launch(block_resources=False)
+            page = browser.launch(block_resources=False, proxy_url=self.PROXY_URL)
 
             keyword_slug = self._slugify(request.job_title)
             location_slug = self._slugify(request.location)

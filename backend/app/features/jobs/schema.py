@@ -1,7 +1,10 @@
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from uuid import UUID
+
+
+VALID_WORK_MODES = {"remote", "onsite", "hybrid", "any"}
 
 
 class JobSearchRequest(BaseModel):
@@ -14,24 +17,23 @@ class JobSearchRequest(BaseModel):
 
     # Filters
     experience: Optional[str] = None
-    work_mode: Optional[str] = None
+    work_mode: Optional[str] = "any"
     posted_within: Optional[str] = None
-    easy_apply: bool = False
+    easy_apply: bool = False  # LinkedIn only — ignored by Naukri (no such concept)
 
-    # Backwards-compatible alias for work_mode=remote
-    remote: Optional[bool] = None
-
-    @model_validator(mode="after")
-    def validate_remote_work_mode(self):
-        mode = (self.work_mode or "").strip().lower()
-        remote_aliases = {"remote"}
-        neutral_modes = {"", "any", "all"}
-        if self.remote is True and mode not in neutral_modes | remote_aliases:
+    @field_validator("work_mode")
+    @classmethod
+    def validate_work_mode(cls, v):
+        if v is None:
+            return "any"
+        v = v.strip().lower()
+        if v == "":
+            return "any"
+        if v not in VALID_WORK_MODES:
             raise ValueError(
-                "remote=true conflicts with work_mode; use work_mode='remote' "
-                "or set remote=false/omit remote"
+                f"work_mode must be one of {sorted(VALID_WORK_MODES)}, got {v!r}"
             )
-        return self
+        return v
 
     model_config = ConfigDict(from_attributes=True)
 

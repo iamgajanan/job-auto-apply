@@ -25,6 +25,11 @@ class BrowserManager:
     that never requests a stylesheet or a font as a strong bot signal
     -- for those, pass block_resources=False so the page loads like a
     normal browser would, at the cost of being slower.
+
+    proxy_url (optional) routes all traffic through an HTTP(S) proxy.
+    Accepts either:
+      - "http://host:port"
+      - "http://user:pass@host:port"  (auth split out automatically)
     """
 
     USER_AGENT = (
@@ -39,7 +44,31 @@ class BrowserManager:
         self.context = None
         self.page = None
 
-    def launch(self, headless: bool = True, block_resources: bool = True):
+    @staticmethod
+    def _parse_proxy(proxy_url: str) -> dict:
+        """
+        Turn 'http://user:pass@host:port' into Playwright's
+        {"server": "http://host:port", "username": ..., "password": ...}
+        Playwright does not reliably parse embedded credentials, so we
+        split them out explicitly.
+        """
+        import re
+        m = re.match(r"^(https?)://([^:]+):([^@]+)@(.+)$", proxy_url)
+        if m:
+            scheme, user, pwd, host_port = m.groups()
+            return {
+                "server": f"{scheme}://{host_port}",
+                "username": user,
+                "password": pwd,
+            }
+        return {"server": proxy_url}
+
+    def launch(
+        self,
+        headless: bool = True,
+        block_resources: bool = True,
+        proxy_url: str = None,
+    ):
 
         profile = (
             Path(__file__)
@@ -65,6 +94,9 @@ class BrowserManager:
                 "Accept-Language": "en-US,en;q=0.9",
             },
         )
+
+        if proxy_url:
+            launch_kwargs["proxy"] = self._parse_proxy(proxy_url)
 
         try:
             # Prefer the real, installed Chrome build over bundled

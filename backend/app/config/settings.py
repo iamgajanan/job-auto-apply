@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     # Comma-separated list, e.g. "http://localhost:3000,https://app.example.com"
     CORS_ORIGINS: str = "http://localhost:3000"
 
+    # Optional HTTP(S) proxy for Naukri/LinkedIn scraping, e.g.
+    # "http://user:pass@p.webshare.io:80". Leave blank/unset to scrape
+    # directly from this machine's own IP (the normal local setup).
+    SCRAPER_PROXY_URL: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]

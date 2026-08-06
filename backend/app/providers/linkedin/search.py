@@ -8,6 +8,7 @@ from app.core.logger import app_logger
 import time
 
 from app.providers.base import BaseProvider, ProviderCapabilities
+from app.config.settings import settings
 
 
 class LinkedInSearch(BaseProvider):
@@ -21,6 +22,7 @@ class LinkedInSearch(BaseProvider):
         login=True,
     )
     JOB_LIMIT = 100          # hard cap: never scrape/return more than this
+    PROXY_URL = settings.SCRAPER_PROXY_URL or None  # from .env, or set externally by Apify actor
     PAGE_SIZE = 25           # LinkedIn's cards-per-page
     MAX_PAGES = 8          # safety cap on pagination loop
     MAX_SCROLLS_PER_PAGE = 15   # a page only ever holds ~25 cards, 15 scrolls is plenty
@@ -46,8 +48,15 @@ class LinkedInSearch(BaseProvider):
     def search(self, request):
 
         browser = BrowserManager()
+
+        if self.PROXY_URL:
+            masked = self.PROXY_URL.split("@")[-1]  # hide credentials in logs
+            app_logger.info(f"LinkedIn scraping via PROXY: {masked}")
+        else:
+            app_logger.info("LinkedIn scraping via DIRECT connection (no proxy)")
+
         try:
-            page = browser.launch()
+            page = browser.launch(proxy_url=self.PROXY_URL)
 
             keyword = quote(request.job_title or "")
             location = quote(request.location or "")
@@ -62,9 +71,8 @@ class LinkedInSearch(BaseProvider):
             if request.easy_apply:
                 base_url += "&f_AL=true"
 
-            # Work Mode. `remote=true` is kept as a backwards-compatible
-            # alias and forces the Remote filter.
-            mode = "remote" if request.remote is True else (request.work_mode or "").lower()
+            # Work Mode
+            mode = (request.work_mode or "any").lower()
             if mode == "remote":
                 base_url += "&f_WT=2"
             elif mode == "hybrid":
