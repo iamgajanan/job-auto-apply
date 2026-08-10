@@ -2,7 +2,6 @@ from urllib.parse import quote
 from pathlib import Path
 
 from app.providers.linkedin.browser import BrowserManager
-from app.gateway.humanizer import Humanizer
 from app.gateway.block_detector import BlockDetector
 from app.core.logger import app_logger
 import time
