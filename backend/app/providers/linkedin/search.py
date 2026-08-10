@@ -12,7 +12,7 @@ from app.config.settings import settings
 
 
 class LinkedInSearch(BaseProvider):
-     
+
     name = "linkedin"
 
     capabilities = ProviderCapabilities(
@@ -24,11 +24,14 @@ class LinkedInSearch(BaseProvider):
     JOB_LIMIT = 100          # hard cap: never scrape/return more than this
     PROXY_URL = settings.SCRAPER_PROXY_URL or None  # from .env, or set externally by Apify actor
     PAGE_SIZE = 25           # LinkedIn's cards-per-page
-    MAX_PAGES = 8          # safety cap on pagination loop
-    MAX_SCROLLS_PER_PAGE = 15   # a page only ever holds ~25 cards, 15 scrolls is plenty
-    SCROLL_POLL_TIMEOUT_MS = 1800  # max time to wait per scroll for new cards to render
-    MAX_CONSECUTIVE_STALLS = 2  # require 2 no-change scrolls in a row before giving up
-    POST_NAV_WAIT_MS = 1500    # was 3000 -- domcontentloaded + this is enough
+    MAX_PAGES = 8             # safety cap on pagination loop
+    # Keep pagination responsive. LinkedIn normally renders a page's cards after
+    # a small number of scrolls; the old 15-scroll loop could spend tens of
+    # seconds waiting even when no more cards were available.
+    MAX_SCROLLS_PER_PAGE = 6
+    SCROLL_POLL_TIMEOUT_MS = 800
+    MAX_CONSECUTIVE_STALLS = 2
+    POST_NAV_WAIT_MS = 800
 
     DEBUG_DIR = Path(__file__).resolve().parents[3] / "debug"
 
@@ -67,11 +70,9 @@ class LinkedInSearch(BaseProvider):
                 f"&location={location}"
             )
 
-            # Easy Apply
             if request.easy_apply:
                 base_url += "&f_AL=true"
 
-            # Work Mode
             mode = (request.work_mode or "any").lower()
             if mode == "remote":
                 base_url += "&f_WT=2"
@@ -80,10 +81,7 @@ class LinkedInSearch(BaseProvider):
             elif mode in ["onsite", "on-site", "on site"]:
                 base_url += "&f_WT=1"
 
-            # Experience: LinkedIn exposes experience *levels*, not an exact
-            # years-of-experience filter. Map requested years to the closest
-            # native level; do not post-filter cards as LinkedIn cards usually
-            # do not contain a reliable numeric experience range.
+            # LinkedIn exposes experience levels rather than exact years.
             if request.experience:
                 try:
                     years = int(request.experience.split()[0])
@@ -100,7 +98,6 @@ class LinkedInSearch(BaseProvider):
                 except Exception:
                     pass
 
-            # Posted Within
             if request.posted_within:
                 posted = request.posted_within.lower()
 
@@ -114,13 +111,6 @@ class LinkedInSearch(BaseProvider):
             jobs = []
             seen_job_ids = set()
 
-            # ---------------------------------------
-            # Paginate: LinkedIn shows ~25 cards per
-            # page, controlled via &start= offset.
-            # Stop as soon as: a page adds no new jobs,
-            # OR we hit JOB_LIMIT, OR MAX_PAGES reached.
-            # ---------------------------------------
-
             for page_num in range(self.MAX_PAGES):
 
                 page_start_time = time.time()
@@ -132,15 +122,14 @@ class LinkedInSearch(BaseProvider):
                 response = page.goto(
                     url,
                     wait_until="domcontentloaded",
-                    timeout=30000,
+                    timeout=20000,
                 )
                 BlockDetector.check("linkedin", page, response)
                 app_logger.debug(f"goto took {time.time() - page_start_time:.2f}s")
-                Humanizer.think(page)
 
-                # Wait for at least one card to show up instead of a fixed
-                # blind sleep -- falls back to the fixed wait if none appear
-                # (e.g. zero-result search) so we don't hang.
+                # Wait only until cards appear. Avoid the previous 1.2-3.0s
+                # humanizer delay on every page; this endpoint is a scraper,
+                # not an interactive browser workflow.
                 try:
                     page.wait_for_selector(
                         ".job-card-container",
@@ -154,17 +143,7 @@ class LinkedInSearch(BaseProvider):
                 cards = page.locator(".job-card-container")
                 app_logger.debug(f"Initially rendered: {cards.count()}")
 
-                # ---------------------------------------
-                # Find the real scrollable container.
-                #
-                # IMPORTANT PERF FIX: the previous version looped over every
-                # single DOM element in Python, issuing one evaluate() round
-                # trip PER ELEMENT (can be 1000+ round trips per page -- this
-                # was the single biggest cause of slow responses). This does
-                # the exact same search in ONE round trip by running the loop
-                # inside the browser via a single page.evaluate() call.
-                # ---------------------------------------
-
+                # Find the real scrollable container in one browser-side pass.
                 best_info = page.evaluate("""
                 () => {
                     const all = document.querySelectorAll('*');
@@ -181,10 +160,6 @@ class LinkedInSearch(BaseProvider):
 
                     if (!best) return null;
 
-                    // Stash the winning element on window so we can scroll
-                    // it directly in later evaluate() calls without having
-                    // to re-run this search or pass elements across the
-                    // Python/JS boundary.
                     window.__scrollTarget = best;
 
                     return {
@@ -201,14 +176,13 @@ class LinkedInSearch(BaseProvider):
                 app_logger.debug(f"Largest scrollable element: {best_info}")
 
                 if best_info:
-                    Humanizer.move_mouse(page)
-
-                    previous = 0
+                    # Start from the cards already rendered. The previous code
+                    # started at zero, causing an unnecessary full polling cycle
+                    # before detecting the first batch of cards.
+                    previous = cards.count()
                     stall_count = 0
 
                     for i in range(self.MAX_SCROLLS_PER_PAGE):
-                        Humanizer.random_scroll(page)
-
                         page.evaluate("""
                         () => {
                             if (window.__scrollTarget) {
@@ -217,12 +191,8 @@ class LinkedInSearch(BaseProvider):
                         }
                         """)
 
-                        # Adaptive wait: poll every 200ms instead of one fixed
-                        # sleep. Breaks out early the moment new cards show up
-                        # (fast case) but keeps checking up to POLL_TIMEOUT_MS
-                        # total before giving up (slow-load case). A single
-                        # short fixed wait was causing false "no more cards"
-                        # stops when LinkedIn just hadn't rendered yet.
+                        # Poll briefly for newly rendered cards and stop as soon
+                        # as LinkedIn has no more cards to add.
                         poll_interval_ms = 200
                         elapsed_ms = 0
                         current = previous
@@ -231,10 +201,10 @@ class LinkedInSearch(BaseProvider):
                             page.wait_for_timeout(poll_interval_ms)
                             elapsed_ms += poll_interval_ms
 
-                            current = page.locator(".job-card-container").count()
+                            current = cards.count()
 
                             if current > previous:
-                                break  # new cards rendered, move to next scroll
+                                break
 
                         app_logger.debug(f"Scroll {i + 1}: {current} (waited {elapsed_ms}ms)")
 
@@ -247,23 +217,17 @@ class LinkedInSearch(BaseProvider):
 
                         previous = current
                         app_logger.debug(f"scroll cumulative time: {time.time() - page_start_time:.2f}s")
-                        # Stop scrolling early if we've already got enough
-                        # jobs overall (accounting for what's on earlier pages)
+
                         if len(jobs) + current >= self.JOB_LIMIT:
                             break
 
                 cards = page.locator(".job-card-container")
-                Humanizer.random_delay(page)
 
                 app_logger.debug(f"Page {page_num + 1} final jobs: {cards.count()}")
 
                 if cards.count() == 0:
                     BlockDetector.check("linkedin", page, response)
-                    # No cards on this page at all -> we've run past the end
-                    # OR something went wrong (rate limit, markup change, etc.)
                     if page_num == 0:
-                        # First page with zero cards is unusual -- save debug
-                        # artifacts so we can inspect what actually loaded
                         self._save_debug(page, "zero-results")
                     app_logger.debug("No cards found on this page. Stopping pagination.")
                     break
@@ -272,13 +236,10 @@ class LinkedInSearch(BaseProvider):
 
                 for i in range(cards.count()):
 
-                    # Stop the instant we hit the cap -- don't keep parsing
-                    # cards we're going to throw away.
                     if len(jobs) >= self.JOB_LIMIT:
                         break
 
                     card = cards.nth(i)
-
                     text = (card.text_content() or "").lower()
 
                     try:
@@ -288,7 +249,7 @@ class LinkedInSearch(BaseProvider):
                             .text_content()
                             .strip()
                         )
-                    except:
+                    except Exception:
                         title = ""
 
                     try:
@@ -298,7 +259,7 @@ class LinkedInSearch(BaseProvider):
                             .text_content()
                             .strip()
                         )
-                    except:
+                    except Exception:
                         company = ""
 
                     try:
@@ -308,12 +269,12 @@ class LinkedInSearch(BaseProvider):
                             .text_content()
                             .strip()
                         )
-                    except:
+                    except Exception:
                         job_location = ""
 
                     try:
                         logo = card.locator("img").first.get_attribute("src") or ""
-                    except:
+                    except Exception:
                         logo = ""
 
                     try:
@@ -322,7 +283,7 @@ class LinkedInSearch(BaseProvider):
                         if link.startswith("/"):
                             link = "https://www.linkedin.com" + link
 
-                    except:
+                    except Exception:
                         link = ""
 
                     job_id = ""
@@ -334,21 +295,12 @@ class LinkedInSearch(BaseProvider):
                                 .split("/")[0]
                                 .split("?")[0]
                             )
-                        except:
+                        except Exception:
                             pass
 
-                    # Skip cards with no resolvable job_id. These are not
-                    # real job listings -- they're LinkedIn's injected
-                    # "recommended" / "hiring in network" widget cards that
-                    # also match .job-card-container but link to
-                    # /jobs/collections/... instead of /jobs/view/{id}/...
-                    # Keeping them causes duplicate '' job_id inserts and
-                    # breaks the DB's unique constraint on job_id.
                     if not job_id:
                         continue
 
-                    # Skip duplicates across pages (LinkedIn sometimes
-                    # repeats the last card(s) of the previous page)
                     if job_id in seen_job_ids:
                         continue
 
@@ -388,19 +340,14 @@ class LinkedInSearch(BaseProvider):
 
                 app_logger.debug(f"Page {page_num + 1} added {page_new_count} new jobs. Total so far: {len(jobs)}")
 
-                # Cap reached -- stop paginating entirely.
                 if len(jobs) >= self.JOB_LIMIT:
                     app_logger.info(f"Reached JOB_LIMIT ({self.JOB_LIMIT}). Stopping pagination.")
                     break
 
-                # If this page contributed no new (unique) jobs,
-                # we've reached the end of the results.
                 if page_new_count == 0:
                     app_logger.debug("No new jobs added from this page. Stopping pagination.")
                     break
 
-            # Final safety trim -- guarantees we never return more than
-            # JOB_LIMIT even if some edge case let extra ones slip through.
             jobs = jobs[: self.JOB_LIMIT]
 
             app_logger.info(f"TOTAL LINKEDIN JOBS SCRAPED: {len(jobs)}")
