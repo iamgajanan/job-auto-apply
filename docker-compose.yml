@@ -1,12 +1,8 @@
-version: "3.9"
-
 services:
 
   postgres:
 
     image: postgres:16
-
-    container_name: job-postgres
 
     restart: unless-stopped
 
@@ -28,8 +24,6 @@ services:
   redis:
 
     image: redis:7
-
-    container_name: job-redis
 
     restart: unless-stopped
 
