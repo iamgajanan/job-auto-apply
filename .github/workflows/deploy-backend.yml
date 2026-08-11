@@ -24,8 +24,8 @@ jobs:
         with:
           version: latest
 
-      - name: Initialize Supabase CLI configuration
-        run: supabase init
+      - name: Verify committed Supabase configuration
+        run: test -f supabase/config.toml && test -d supabase/migrations
 
       - name: Apply database migrations
         env:
