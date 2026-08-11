@@ -17,7 +17,7 @@ class SupabaseAuthService:
     """Server-side adapter around Supabase Auth's HTTP API."""
 
     def _require_config(self) -> None:
-        if not settings.SUPABASE_URL or not settings.SUPABASE_ANON_KEY:
+        if not settings.SUPABASE_URL or not settings.supabase_auth_key:
             raise SupabaseAuthError("Supabase Auth is not configured", 503)
 
     @property
@@ -26,7 +26,7 @@ class SupabaseAuthService:
 
     def _headers(self, access_token: str | None = None) -> dict[str, str]:
         headers = {
-            "apikey": settings.SUPABASE_ANON_KEY,
+            "apikey": settings.supabase_auth_key,
             "Content-Type": "application/json",
         }
         if access_token:
