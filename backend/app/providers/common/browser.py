@@ -1,4 +1,7 @@
+import platform
+import shutil
 from pathlib import Path
+
 from playwright.sync_api import sync_playwright
 
 
@@ -8,35 +11,15 @@ class BrowserManager:
 
     profile_name controls WHICH on-disk browser-data folder is used.
     Each site that needs its own logged-in session (LinkedIn, Naukri, ...)
-    should use its own profile_name so:
-      - their cookies/session never mix
-      - two providers can safely launch a browser in parallel
-        (e.g. two Celery workers running at once) without fighting
-        over the same locked profile directory.
+    should use its own profile_name so their cookies/session never mix.
 
-    headless=False is only needed for the one-time interactive login
-    scripts (login_once.py / login_naukri_once.py) where a human has
-    to actually see the page and type credentials/OTP. Regular scraping
-    runs headless=True by default.
+    headless=False is only needed for one-time interactive login scripts.
+    Regular scraping runs headless=True by default.
 
-    block_resources=True (the LinkedIn-tuned default) aborts
-    images/fonts/media/stylesheets for speed. Some sites sit behind
-    bot-management edges (Akamai, Cloudflare, etc.) that treat a page
-    that never requests a stylesheet or a font as a strong bot signal
-    -- for those, pass block_resources=False so the page loads like a
-    normal browser would, at the cost of being slower.
-
-    proxy_url (optional) routes all traffic through an HTTP(S) proxy.
-    Accepts either:
-      - "http://host:port"
-      - "http://user:pass@host:port"  (auth split out automatically)
+    On Linux/ARM devices such as Raspberry Pi, Playwright's bundled Chrome
+    channel may not exist. In that case we automatically use an installed
+    system Chromium (for example /usr/bin/chromium).
     """
-
-    USER_AGENT = (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
 
     def __init__(self, profile_name: str = "browser-data"):
         self.profile_name = profile_name
@@ -47,12 +30,10 @@ class BrowserManager:
     @staticmethod
     def _parse_proxy(proxy_url: str) -> dict:
         """
-        Turn 'http://user:pass@host:port' into Playwright's
-        {"server": "http://host:port", "username": ..., "password": ...}
-        Playwright does not reliably parse embedded credentials, so we
-        split them out explicitly.
+        Turn 'http://user:pass@host:port' into Playwright's proxy config.
         """
         import re
+
         m = re.match(r"^(https?)://([^:]+):([^@]+)@(.+)$", proxy_url)
         if m:
             scheme, user, pwd, host_port = m.groups()
@@ -63,56 +44,83 @@ class BrowserManager:
             }
         return {"server": proxy_url}
 
+    @staticmethod
+    def _system_chromium() -> str | None:
+        """Return an installed Chromium executable on Linux, if available."""
+        if platform.system().lower() != "linux":
+            return None
+
+        for executable in (
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            shutil.which("chromium"),
+            shutil.which("chromium-browser"),
+        ):
+            if executable and Path(executable).is_file():
+                return executable
+        return None
+
     def launch(
         self,
         headless: bool = True,
         block_resources: bool = True,
         proxy_url: str = None,
     ):
-
         profile = (
-            Path(__file__)
-            .resolve()
-            .parents[3]
-            / self.profile_name
+            Path(__file__).resolve().parents[3] / self.profile_name
         )
 
         self.playwright = sync_playwright().start()
+
+        is_linux = platform.system().lower() == "linux"
+        system_chromium = self._system_chromium()
+
+        if is_linux and system_chromium:
+            user_agent = (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/140.0.0.0 Safari/537.36"
+            )
+        else:
+            user_agent = (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
 
         launch_kwargs = dict(
             user_data_dir=str(profile),
             headless=headless,
             slow_mo=0,
-            viewport={
-                "width": 1440,
-                "height": 900,
-            },
+            viewport={"width": 1440, "height": 900},
             locale="en-US",
             timezone_id="Asia/Kolkata",
-            user_agent=self.USER_AGENT,
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9",
-            },
+            user_agent=user_agent,
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
         )
 
         if proxy_url:
             launch_kwargs["proxy"] = self._parse_proxy(proxy_url)
 
-        try:
-            # Prefer the real, installed Chrome build over bundled
-            # Chromium -- it presents a normal Chrome fingerprint
-            # (build id, plugin list, etc.) instead of the generic
-            # headless-Chromium one that bot-management products
-            # specifically look for.
+        if system_chromium:
+            app_logger_message = f"Using system Chromium: {system_chromium}"
+            print(app_logger_message)
+            launch_kwargs["executable_path"] = system_chromium
             self.context = self.playwright.chromium.launch_persistent_context(
-                channel="chrome",
-                **launch_kwargs,
+                **launch_kwargs
             )
-        except Exception as e:
-            print("No system Chrome found, falling back to bundled Chromium:", e)
-            self.context = self.playwright.chromium.launch_persistent_context(
-                **launch_kwargs,
-            )
+        else:
+            try:
+                self.context = self.playwright.chromium.launch_persistent_context(
+                    channel="chrome",
+                    **launch_kwargs,
+                )
+                print("Using installed Chrome channel")
+            except Exception as e:
+                print("Chrome channel unavailable, falling back to Playwright Chromium:", e)
+                self.context = self.playwright.chromium.launch_persistent_context(
+                    **launch_kwargs
+                )
 
         if block_resources:
             self.context.route(
@@ -135,9 +143,6 @@ class BrowserManager:
             else self.context.new_page()
         )
 
-        # Best-effort: patch the single most commonly checked automation
-        # flag. This alone will NOT get past serious bot-management (they
-        # fingerprint far more than this), but it's free and harmless.
         self.page.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
@@ -148,7 +153,6 @@ class BrowserManager:
         return self.page
 
     def close(self):
-
         if self.context:
             self.context.close()
 
