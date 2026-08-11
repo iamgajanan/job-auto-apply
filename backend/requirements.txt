@@ -15,7 +15,7 @@ fastapi==0.128.8
 gotrue==2.11.0
 h11==0.16.0
 httpcore==1.0.9
-httpx==0.28.1
+httpx==0.27.2
 idna==3.18
 loguru==0.7.3
 MarkupSafe==3.0.3
