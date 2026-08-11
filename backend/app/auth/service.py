@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from supabase import Client, create_client
 from supabase.lib.client_options import ClientOptions
 
@@ -15,12 +16,15 @@ class SupabaseAuthError(RuntimeError):
 
 
 class SupabaseAuthService:
-    """Small server-side adapter around the official Supabase Python Auth client.
+    """Server-side adapter around Supabase Auth.
 
-    This is intentionally a compatibility layer for the current FastAPI auth
-    endpoints. The frontend will later use Supabase Auth directly (Option B),
-    while FastAPI remains responsible for authorization, profiles, quotas and
-    business rules.
+    The official Supabase Python client is used for signup/login/refresh/user
+    operations. Direct HTTP is retained only for the two operations that accept
+    an access token without requiring a locally persisted server session.
+
+    This is a compatibility layer for the current FastAPI auth endpoints. The
+    frontend will later use Supabase Auth directly (Option B), while FastAPI
+    remains responsible for authorization, profiles, quotas and business rules.
     """
 
     def _require_config(self) -> None:
@@ -56,8 +60,6 @@ class SupabaseAuthService:
     @classmethod
     def _response_dict(cls, response: Any) -> dict[str, Any]:
         data = cls._model_dict(response)
-        # Supabase Python responses expose user/session as attributes in
-        # addition to their serialized representation in different releases.
         for key in ("user", "session"):
             if key not in data and hasattr(response, key):
                 data[key] = cls._model_dict(getattr(response, key))
@@ -67,9 +69,58 @@ class SupabaseAuthService:
     def _raise_auth_error(exc: Exception) -> None:
         status_code = getattr(exc, "status_code", 400) or 400
         message = str(exc) or "Supabase authentication request failed"
-        if hasattr(exc, "message") and getattr(exc, "message"):
-            message = str(getattr(exc, "message"))
+        if getattr(exc, "message", None):
+            message = str(exc.message)
         raise SupabaseAuthError(message, int(status_code)) from exc
+
+    def _http_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        access_token: str | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._require_config()
+        headers = {
+            "apikey": settings.supabase_auth_key,
+            "Content-Type": "application/json",
+        }
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+
+        try:
+            with httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+                response = client.request(
+                    method,
+                    f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/{path.lstrip('/')}",
+                    headers=headers,
+                    json=json,
+                )
+        except httpx.TimeoutException as exc:
+            raise SupabaseAuthError("Supabase Auth request timed out", 503) from exc
+        except httpx.HTTPError as exc:
+            raise SupabaseAuthError("Supabase Auth is temporarily unavailable", 503) from exc
+
+        if response.status_code >= 400:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            message = (
+                payload.get("msg")
+                or payload.get("message")
+                or payload.get("error_description")
+                or "Supabase authentication request failed"
+            )
+            raise SupabaseAuthError(str(message), response.status_code)
+
+        if not response.content:
+            return {}
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise SupabaseAuthError("Supabase Auth returned invalid JSON", 502) from exc
 
     def signup(self, email: str, password: str, full_name: str | None) -> dict[str, Any]:
         client = self._client()
@@ -111,6 +162,14 @@ class SupabaseAuthService:
         except Exception as exc:
             self._raise_auth_error(exc)
 
+    def update_password(self, access_token: str, password: str) -> dict[str, Any]:
+        return self._http_request(
+            "PUT",
+            "/user",
+            access_token=access_token,
+            json={"password": password},
+        )
+
     def get_user(self, access_token: str) -> dict[str, Any]:
         client = self._client()
         try:
@@ -119,31 +178,8 @@ class SupabaseAuthService:
         except Exception as exc:
             self._raise_auth_error(exc)
 
-    def update_password(self, access_token: str, password: str) -> dict[str, Any]:
-        client = self._client()
-        try:
-            # Supabase's user-update API requires an authenticated session.
-            # Set the access token with a placeholder refresh token is not safe,
-            # so the compatibility endpoint is intentionally left for Option B.
-            # The frontend will update passwords through Supabase Auth directly.
-            raise SupabaseAuthError(
-                "Password updates are handled by Supabase Auth client-side",
-                501,
-            )
-        except SupabaseAuthError:
-            raise
-        except Exception as exc:
-            self._raise_auth_error(exc)
-
     def logout(self, access_token: str) -> None:
-        client = self._client()
-        try:
-            # Supabase's Python client uses its local session for sign_out.
-            # Server-side compatibility logout is therefore a no-op; the
-            # client-side Supabase session is authoritative.
-            return None
-        except Exception as exc:
-            self._raise_auth_error(exc)
+        self._http_request("POST", "/logout", access_token=access_token)
 
 
 auth_service = SupabaseAuthService()
