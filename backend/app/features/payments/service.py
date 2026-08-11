@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException
@@ -47,7 +49,7 @@ class PaymentService:
             raise HTTPException(status_code=400, detail="The free plan does not require payment")
 
         self._require_keys()
-        receipt = f"jobauto_{user_id[:8]}_{plan_code}_{int(datetime.now(timezone.utc).timestamp())}"
+        receipt = f"jobauto_{user_id[:8]}_{plan_code}_{uuid4().hex[:10]}"
         payload = {
             "amount": int(plan["price_inr_paise"]),
             "currency": "INR",
@@ -99,7 +101,7 @@ class PaymentService:
                     "plan_code": plan_code,
                     "order_id": order_id,
                     "amount": int(plan["price_inr_paise"]),
-                    "metadata": '{"receipt":"' + receipt + '"}',
+                    "metadata": json.dumps({"receipt": receipt}),
                 },
             )
 
@@ -148,12 +150,7 @@ class PaymentService:
             payment = connection.execute(
                 text(
                     """
-                    select
-                        id,
-                        user_id,
-                        plan_code,
-                        amount_inr_paise,
-                        status
+                    select id, user_id, plan_code, amount_inr_paise, status
                     from public.payments
                     where provider = 'razorpay'
                       and provider_order_id = :order_id
@@ -188,10 +185,7 @@ class PaymentService:
                 }
 
             if signature is not None and not self.verify_signature(
-                order_id,
-                payment_id,
-                signature,
-                settings.RAZORPAY_KEY_SECRET,
+                order_id, payment_id, signature, settings.RAZORPAY_KEY_SECRET
             ):
                 raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
 
@@ -228,28 +222,16 @@ class PaymentService:
                     where id = :id
                     """
                 ),
-                {
-                    "payment_id": payment_id,
-                    "signature": signature,
-                    "id": payment["id"],
-                },
+                {"payment_id": payment_id, "signature": signature, "id": payment["id"]},
             )
 
             connection.execute(
                 text(
                     """
                     insert into public.quota_allocations (
-                        user_id,
-                        plan_code,
-                        granted_searches,
-                        source,
-                        starts_at
+                        user_id, plan_code, granted_searches, source, starts_at
                     ) values (
-                        :user_id,
-                        :plan_code,
-                        :search_limit,
-                        'payment',
-                        timezone('utc', now())
+                        :user_id, :plan_code, :search_limit, 'payment', timezone('utc', now())
                     )
                     """
                 ),
