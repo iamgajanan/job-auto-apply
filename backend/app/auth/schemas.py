@@ -16,6 +16,15 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=20)
 
 
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+    redirect_to: str | None = Field(default=None, max_length=500)
+
+
+class PasswordUpdateRequest(BaseModel):
+    password: str = Field(min_length=8, max_length=72)
+
+
 class Session(BaseModel):
     access_token: str
     refresh_token: str
