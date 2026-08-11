@@ -1,0 +1,36 @@
+name: Database CI
+
+on:
+  pull_request:
+    branches:
+      - just-scrapping
+    paths:
+      - "supabase/**"
+      - ".github/workflows/database-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  database-tests:
+    name: Validate Supabase schema
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Initialize Supabase CLI configuration
+        run: supabase init
+
+      - name: Start local Postgres
+        run: supabase db start
+
+      - name: Run database tests
+        run: supabase test db
