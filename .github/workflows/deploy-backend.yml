@@ -13,7 +13,7 @@ concurrency:
 jobs:
   deploy:
     name: Deploy FastAPI backend
-    runs-on: [self-hosted, linux, arm64, job-auto-apply]
+    runs-on: [self-hosted, linux, arm64]
 
     steps:
       - name: Deploy just-scrapping to Raspberry Pi
