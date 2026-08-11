@@ -209,6 +209,7 @@ jobs:
           print(data["user"]["id"])
           PY
           )
+          export SMOKE_TEST_USER_ID="$USER_ID"
 
           echo "[4/12] Profile and free quota bootstrap"
           "$VENV/python" - <<'PY'
@@ -237,16 +238,6 @@ jobs:
                   )
               connection.commit()
           print("profile/quota: PASS")
-          PY
-
-          export SMOKE_TEST_USER_ID="$USER_ID"
-          "$VENV/python" - <<'PY'
-          import os
-          import psycopg
-          with psycopg.connect(os.environ["SMOKE_TEST_DB_URL"]) as connection:
-              with connection.cursor() as cursor:
-                  cursor.execute("update auth.users set email_confirmed_at = coalesce(email_confirmed_at, timezone('utc', now())) where id = %s", (os.environ["SMOKE_TEST_USER_ID"],))
-              connection.commit()
           PY
 
           echo "[5/12] Missing/invalid authentication"
