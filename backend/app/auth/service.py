@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from supabase import Client, create_client
-from supabase.lib.client_options import ClientOptions
 
 from app.config.settings import settings
 
@@ -16,62 +14,21 @@ class SupabaseAuthError(RuntimeError):
 
 
 class SupabaseAuthService:
-    """Server-side adapter around Supabase Auth.
+    """Server-side adapter around Supabase Auth's HTTP API.
 
-    The official Supabase Python client is used for signup/login/refresh/user
-    operations. Direct HTTP is retained only for the two operations that accept
-    an access token without requiring a locally persisted server session.
+    FastAPI owns the application authorization/profile/quota layer. Supabase
+    Auth remains the source of truth for credentials and sessions.
 
-    This is a compatibility layer for the current FastAPI auth endpoints. The
-    frontend will later use Supabase Auth directly (Option B), while FastAPI
-    remains responsible for authorization, profiles, quotas and business rules.
+    Direct HTTP is used deliberately here instead of constructing a long-lived
+    Supabase Python SDK client for every request. The SDK client initialization
+    was failing in the Raspberry Pi runtime even though the same Auth API was
+    healthy and reachable, so keeping this adapter HTTP-only removes that
+    runtime dependency from the authentication path.
     """
 
     def _require_config(self) -> None:
         if not settings.SUPABASE_URL or not settings.supabase_auth_key:
             raise SupabaseAuthError("Supabase Auth is not configured", 503)
-
-    def _client(self) -> Client:
-        self._require_config()
-        try:
-            return create_client(
-                settings.SUPABASE_URL.rstrip("/"),
-                settings.supabase_auth_key,
-                options=ClientOptions(
-                    auto_refresh_token=False,
-                    persist_session=False,
-                ),
-            )
-        except Exception as exc:
-            raise SupabaseAuthError("Unable to initialize Supabase Auth", 503) from exc
-
-    @staticmethod
-    def _model_dict(value: Any) -> dict[str, Any]:
-        if value is None:
-            return {}
-        if isinstance(value, dict):
-            return value
-        if hasattr(value, "model_dump"):
-            return value.model_dump()
-        if hasattr(value, "dict"):
-            return value.dict()
-        return dict(vars(value))
-
-    @classmethod
-    def _response_dict(cls, response: Any) -> dict[str, Any]:
-        data = cls._model_dict(response)
-        for key in ("user", "session"):
-            if key not in data and hasattr(response, key):
-                data[key] = cls._model_dict(getattr(response, key))
-        return data
-
-    @staticmethod
-    def _raise_auth_error(exc: Exception) -> None:
-        status_code = getattr(exc, "status_code", 400) or 400
-        message = str(exc) or "Supabase authentication request failed"
-        if getattr(exc, "message", None):
-            message = str(exc.message)
-        raise SupabaseAuthError(message, int(status_code)) from exc
 
     def _http_request(
         self,
@@ -117,50 +74,40 @@ class SupabaseAuthService:
 
         if not response.content:
             return {}
+
         try:
             return response.json()
         except ValueError as exc:
             raise SupabaseAuthError("Supabase Auth returned invalid JSON", 502) from exc
 
     def signup(self, email: str, password: str, full_name: str | None) -> dict[str, Any]:
-        client = self._client()
-        try:
-            response = client.auth.sign_up(
-                {
-                    "email": email,
-                    "password": password,
-                    "options": {"data": {"full_name": full_name}} if full_name else {},
-                }
-            )
-            return self._response_dict(response)
-        except Exception as exc:
-            self._raise_auth_error(exc)
+        body: dict[str, Any] = {
+            "email": email,
+            "password": password,
+        }
+        if full_name:
+            body["data"] = {"full_name": full_name}
+        return self._http_request("POST", "/signup", json=body)
 
     def login(self, email: str, password: str) -> dict[str, Any]:
-        client = self._client()
-        try:
-            response = client.auth.sign_in_with_password(
-                {"email": email, "password": password}
-            )
-            return self._response_dict(response)
-        except Exception as exc:
-            self._raise_auth_error(exc)
+        return self._http_request(
+            "POST",
+            "/token?grant_type=password",
+            json={"email": email, "password": password},
+        )
 
     def refresh(self, refresh_token: str) -> dict[str, Any]:
-        client = self._client()
-        try:
-            response = client.auth.refresh_session(refresh_token)
-            return self._response_dict(response)
-        except Exception as exc:
-            self._raise_auth_error(exc)
+        return self._http_request(
+            "POST",
+            "/token?grant_type=refresh_token",
+            json={"refresh_token": refresh_token},
+        )
 
     def request_password_reset(self, email: str, redirect_to: str | None) -> None:
-        client = self._client()
-        try:
-            options = {"redirect_to": redirect_to} if redirect_to else {}
-            client.auth.reset_password_for_email(email, options)
-        except Exception as exc:
-            self._raise_auth_error(exc)
+        body: dict[str, Any] = {"email": email}
+        if redirect_to:
+            body["redirect_to"] = redirect_to
+        self._http_request("POST", "/recover", json=body)
 
     def update_password(self, access_token: str, password: str) -> dict[str, Any]:
         return self._http_request(
@@ -171,12 +118,7 @@ class SupabaseAuthService:
         )
 
     def get_user(self, access_token: str) -> dict[str, Any]:
-        client = self._client()
-        try:
-            response = client.auth.get_user(access_token)
-            return self._response_dict(response)
-        except Exception as exc:
-            self._raise_auth_error(exc)
+        return self._http_request("GET", "/user", access_token=access_token)
 
     def logout(self, access_token: str) -> None:
         self._http_request("POST", "/logout", access_token=access_token)
