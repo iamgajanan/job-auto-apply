@@ -1,0 +1,3 @@
+# Local Supabase development configuration.
+# The production project is selected separately by the deployment workflow.
+project_id = "job-auto-apply"
