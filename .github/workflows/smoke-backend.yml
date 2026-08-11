@@ -44,7 +44,7 @@ jobs:
           test -n "$SUPABASE_DB_URL" || { echo "ERROR: SUPABASE_DB_URL is not configured"; exit 1; }
 
           TMP_DIR="$(mktemp -d)"
-          TEST_EMAIL="ci-auth-$(date +%s)-$RANDOM@example.invalid"
+          TEST_EMAIL="ci-auth-$(date +%s)-$RANDOM@example.com"
           TEST_PASSWORD="TestPassword123!"
           NEW_PASSWORD="NewTestPassword123!"
 
@@ -278,7 +278,7 @@ jobs:
           status=$(curl -sS -o "$TMP_DIR/reset.json" -w '%{http_code}' \
             -X POST "$BASE_URL/api/v1/auth/password-reset" \
             -H 'Content-Type: application/json' \
-            --data '{"email":"definitely-not-a-real-user@example.invalid"}')
+            --data '{"email":"nobody-ci@example.com"}')
           assert_status 202 "$status" "$TMP_DIR/reset.json"
 
           echo "BACKEND API SMOKE TESTS: PASS"
