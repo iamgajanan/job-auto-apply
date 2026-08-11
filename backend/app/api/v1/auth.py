@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import text
@@ -49,8 +51,6 @@ def _profile_for_user(user_id: str, email: str | None = None, full_name: str | N
     if row:
         return UserProfile(**dict(row))
 
-    from uuid import UUID
-
     return load_profile(UUID(user_id), email, full_name)
 
 
@@ -66,7 +66,7 @@ def signup(request: SignupRequest):
     if not user_id:
         raise HTTPException(status_code=502, detail="Supabase did not return a user")
 
-    profile = _profile_for_user(user_id, user.get("email"), request.full_name)
+    profile = load_profile(UUID(user_id), user.get("email"), request.full_name)
     return AuthResponse(
         user=profile,
         session=_session(payload),
@@ -79,23 +79,20 @@ def login(request: LoginRequest):
     try:
         payload = auth_service.login(request.email.lower(), request.password)
     except SupabaseAuthError as exc:
-        # Do not reveal whether an email exists.
         raise HTTPException(status_code=401, detail="Invalid email or password") from exc
 
     user = payload.get("user") or {}
     if not user.get("id"):
         raise HTTPException(status_code=502, detail="Supabase did not return a user")
 
-    profile = _profile_for_user(user["id"], user.get("email"), (user.get("user_metadata") or {}).get("full_name"))
-    if profile.status != "active":
-        raise HTTPException(status_code=403, detail="Account is not active")
-
-    # Refresh the admin allowlist-derived role on every login.
     profile = load_profile(
-        __import__("uuid").UUID(user["id"]),
+        UUID(user["id"]),
         user.get("email"),
         (user.get("user_metadata") or {}).get("full_name"),
     )
+    if profile.status != "active":
+        raise HTTPException(status_code=403, detail="Account is not active")
+
     return AuthResponse(user=profile, session=_session(payload))
 
 
@@ -117,7 +114,6 @@ def password_reset(request: PasswordResetRequest):
     try:
         auth_service.request_password_reset(request.email.lower(), request.redirect_to)
     except SupabaseAuthError:
-        # Do not leak account existence or email-delivery details.
         pass
     return {"message": "If the account exists, password reset instructions will be sent."}
 
