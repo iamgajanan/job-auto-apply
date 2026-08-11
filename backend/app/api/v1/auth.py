@@ -54,6 +54,20 @@ def _profile_for_user(user_id: str, email: str | None = None, full_name: str | N
     return load_profile(UUID(user_id), email, full_name)
 
 
+def _unauthorized_status(exc: SupabaseAuthError) -> int:
+    """Map invalid/expired credentials to 401 without hiding service failures."""
+    if exc.status_code in (401, 403):
+        return status.HTTP_401_UNAUTHORIZED
+    return exc.status_code
+
+
+def _login_status(exc: SupabaseAuthError) -> int:
+    """Keep rate-limit/service failures visible while normalizing bad credentials."""
+    if exc.status_code in (429, 500, 502, 503):
+        return exc.status_code
+    return status.HTTP_401_UNAUTHORIZED
+
+
 @router.post("/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 def signup(request: SignupRequest):
     try:
@@ -79,7 +93,7 @@ def login(request: LoginRequest):
     try:
         payload = auth_service.login(request.email.lower(), request.password)
     except SupabaseAuthError as exc:
-        raise HTTPException(status_code=401, detail="Invalid email or password") from exc
+        raise HTTPException(status_code=_login_status(exc), detail="Invalid email or password") from exc
 
     user = payload.get("user") or {}
     if not user.get("id"):
@@ -101,7 +115,10 @@ def refresh(request: RefreshRequest):
     try:
         payload = auth_service.refresh(request.refresh_token)
     except SupabaseAuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail="Refresh token is invalid or expired") from exc
+        raise HTTPException(
+            status_code=_unauthorized_status(exc),
+            detail="Refresh token is invalid or expired",
+        ) from exc
 
     session = _session(payload)
     if not session:
@@ -128,7 +145,10 @@ def update_password(
     try:
         auth_service.update_password(credentials.credentials, request.password)
     except SupabaseAuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail="Unable to update password") from exc
+        raise HTTPException(
+            status_code=_unauthorized_status(exc),
+            detail="Unable to update password",
+        ) from exc
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -138,7 +158,10 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
     try:
         auth_service.logout(credentials.credentials)
     except SupabaseAuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail="Unable to sign out") from exc
+        raise HTTPException(
+            status_code=_unauthorized_status(exc),
+            detail="Unable to sign out",
+        ) from exc
 
 
 @router.get("/me", response_model=CurrentUser)
