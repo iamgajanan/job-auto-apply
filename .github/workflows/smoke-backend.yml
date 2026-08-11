@@ -20,18 +20,21 @@ jobs:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
 
     steps:
-      - name: Wait for deployed backend
+      - name: Wait for this commit to be deployed
         shell: bash
         run: |
           set -Eeuo pipefail
-          for i in {1..45}; do
-            if curl -fsS --max-time 3 "$BASE_URL/" >/tmp/job-auto-apply-smoke-health.json; then
+          for i in {1..60}; do
+            current_sha="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || true)"
+            if [ "$current_sha" = "$GITHUB_SHA" ] && curl -fsS --max-time 3 "$BASE_URL/" >/tmp/job-auto-apply-smoke-health.json; then
               cat /tmp/job-auto-apply-smoke-health.json
+              echo "deployed commit: $current_sha"
               exit 0
             fi
             sleep 2
           done
-          echo "ERROR: backend did not become healthy on $BASE_URL"
+          echo "ERROR: deployment did not reach commit $GITHUB_SHA"
+          git -C "$APP_DIR" rev-parse HEAD || true
           exit 1
 
       - name: Run API smoke tests
