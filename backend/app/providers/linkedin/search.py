@@ -1,5 +1,7 @@
 from pathlib import Path
+import re
 import time
+from urllib.parse import urlencode
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -25,15 +27,10 @@ class LinkedInSearch(BaseProvider):
     SCROLL_WAIT_MS = 700
     MAX_CONSECUTIVE_STALLS = 3
     NAVIGATION_TIMEOUT_MS = 20000
-    SEARCH_RESULT_TIMEOUT_MS = 12000
+    RESULT_WAIT_TIMEOUT_MS = 15000
 
     PROXY_URL = settings.SCRAPER_PROXY_URL or None
     DEBUG_DIR = Path(__file__).resolve().parents[3] / "debug"
-
-    JOB_LINK_SELECTORS = (
-        "a[href*='/jobs/view/']",
-        "a[href*='/jobs/collections/']",
-    )
 
     def _save_debug(self, page, tag: str):
         try:
@@ -49,50 +46,77 @@ class LinkedInSearch(BaseProvider):
             app_logger.warning(f"LinkedIn debug save failed: {e}")
 
     @staticmethod
-    def _build_ai_query(request) -> str:
-        """Build the natural-language query expected by LinkedIn's new Jobs UI."""
-        parts = []
-        title = (request.job_title or "").strip()
-        location = (request.location or "").strip()
-        experience = (request.experience or "").strip()
-        work_mode = (request.work_mode or "any").strip().lower()
-        posted = (request.posted_within or "").strip().lower()
+    def _posted_filter(value: str) -> str | None:
+        return {
+            "day": "r86400",
+            "week": "r604800",
+            "month": "r2592000",
+        }.get((value or "").strip().lower())
 
-        if title:
-            parts.append(title)
-        parts.append("jobs")
-        if location:
-            parts.append(f"in {location}")
-        if experience:
-            parts.append(f"for {experience} experience")
-        if work_mode not in {"", "any", "all"}:
-            parts.append({
-                "remote": "remote",
-                "hybrid": "hybrid",
-                "onsite": "on-site",
-                "on-site": "on-site",
-                "on site": "on-site",
-            }.get(work_mode, work_mode))
+    @staticmethod
+    def _work_mode_filter(value: str) -> str | None:
+        return {
+            "onsite": "1",
+            "on-site": "1",
+            "on site": "1",
+            "remote": "2",
+            "hybrid": "3",
+        }.get((value or "").strip().lower())
+
+    @staticmethod
+    def _experience_filter(value: str) -> str | None:
+        """Map common experience wording to LinkedIn's classic experience filter."""
+        text = (value or "").lower()
+        match = re.search(r"(\d+(?:\.\d+)?)", text)
+        if not match:
+            return None
+        years = float(match.group(1))
+        if years <= 0:
+            return "1"
+        if years <= 2:
+            return "2"
+        if years <= 5:
+            return "3"
+        if years <= 10:
+            return "4"
+        if years <= 15:
+            return "5"
+        return "6"
+
+    @classmethod
+    def _build_classic_url(cls, request) -> str:
+        """Build the classic /jobs/search URL instead of LinkedIn's AI search page."""
+        params = {
+            "keywords": (request.job_title or "").strip(),
+            "location": (request.location or "").strip(),
+        }
+
+        posted = cls._posted_filter(request.posted_within)
         if posted:
-            posted_phrase = {
-                "day": "posted in the past day",
-                "week": "posted in the past week",
-                "month": "posted in the past month",
-            }.get(posted)
-            if posted_phrase:
-                parts.append(posted_phrase)
+            params["f_TPR"] = posted
+
+        work_mode = cls._work_mode_filter(request.work_mode)
+        if work_mode:
+            params["f_WT"] = work_mode
+
+        experience = cls._experience_filter(request.experience)
+        if experience:
+            params["f_E"] = experience
+
         if request.easy_apply:
-            parts.append("Easy Apply")
-        return " ".join(parts).strip()
+            params["f_AL"] = "true"
+
+        params["start"] = "0"
+        return "https://www.linkedin.com/jobs/search/?" + urlencode(params)
 
     def _extract_results(self, page):
-        """Extract LinkedIn job links in one browser-side pass."""
+        """Extract classic LinkedIn job cards in one browser-side pass."""
         return page.evaluate(
             """
             () => {
                 const selectors = [
-                    "a[href*='/jobs/view/']",
-                    "a[href*='/jobs/collections/']"
+                    'a[href*='/jobs/view/']',
+                    'a[href*='/jobs/collections/']'
                 ];
                 const results = [];
                 const seen = new Set();
@@ -105,13 +129,13 @@ class LinkedInSearch(BaseProvider):
                         seen.add(match[1]);
 
                         let root = link;
-                        for (let i = 0; i < 8 && root.parentElement; i++) {
+                        for (let i = 0; i < 10 && root.parentElement; i++) {
                             const parent = root.parentElement;
                             const cls = String(parent.className || '');
                             if (
                                 parent.tagName === 'LI' ||
                                 parent.tagName === 'ARTICLE' ||
-                                /job-card|base-card|search-result|list-item/i.test(cls)
+                                /base-card|job-card|search-result|list-item/i.test(cls)
                             ) {
                                 root = parent;
                                 break;
@@ -133,22 +157,22 @@ class LinkedInSearch(BaseProvider):
                             href,
                             text: (root.innerText || link.innerText || '').trim(),
                             title: pick([
-                                'h3', 'h2', 'strong',
                                 '.base-search-card__title',
                                 '.job-card-list__title',
+                                'h3', 'h2', 'strong',
                                 '[class*="job-card-list__title"]',
                                 '[class*="search-card__title"]'
                             ]),
                             company: pick([
-                                '.artdeco-entity-lockup__subtitle',
                                 '.base-search-card__subtitle',
+                                '.artdeco-entity-lockup__subtitle',
                                 '.job-card-container__company-name',
                                 '[class*="company-name"]'
                             ]),
                             location: pick([
-                                '.artdeco-entity-lockup__caption',
                                 '.job-search-card__location',
                                 '.base-search-card__metadata',
+                                '.artdeco-entity-lockup__caption',
                                 '[class*="location"]'
                             ]),
                             logo: root.querySelector('img')?.src || ''
@@ -159,42 +183,6 @@ class LinkedInSearch(BaseProvider):
             }
             """
         )
-
-    def _open_ai_search(self, page, query: str):
-        """Submit a natural-language search through LinkedIn's current Jobs UI."""
-        started = time.time()
-        try:
-            page.wait_for_selector(
-                '[data-testid="typeahead-input"]',
-                timeout=self.SEARCH_RESULT_TIMEOUT_MS,
-            )
-        except PlaywrightTimeoutError:
-            app_logger.warning("LinkedIn Jobs search input was not found")
-            return False
-
-        search_input = page.locator('[data-testid="typeahead-input"]').first
-        search_input.fill(query)
-        search_input.press("Enter")
-
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=5000)
-        except PlaywrightTimeoutError:
-            pass
-
-        try:
-            page.wait_for_function(
-                """() => location.pathname.includes('/jobs/search-results') ||
-                         document.querySelectorAll("a[href*='/jobs/view/']").length > 0""",
-                timeout=self.SEARCH_RESULT_TIMEOUT_MS,
-            )
-        except PlaywrightTimeoutError:
-            pass
-
-        app_logger.debug(
-            f"LinkedIn AI search submitted in {time.time() - started:.2f}s | "
-            f"query={query!r} | url={page.url}"
-        )
-        return True
 
     def search(self, request):
         browser = BrowserManager()
@@ -207,112 +195,118 @@ class LinkedInSearch(BaseProvider):
 
         try:
             page = browser.launch(proxy_url=self.PROXY_URL)
-            query = self._build_ai_query(request)
-            app_logger.info(f"LinkedIn AI job search query: {query}")
+            url = self._build_classic_url(request)
+            app_logger.info(f"LinkedIn classic search URL: {url}")
 
             try:
+                response = page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=self.NAVIGATION_TIMEOUT_MS,
+                )
+            except PlaywrightTimeoutError:
+                app_logger.warning(
+                    "LinkedIn navigation timed out; continuing with available DOM"
+                )
                 response = None
-                try:
-                    response = page.goto(
-                        "https://www.linkedin.com/jobs/",
-                        wait_until="commit",
-                        timeout=self.NAVIGATION_TIMEOUT_MS,
-                    )
-                except PlaywrightTimeoutError:
-                    app_logger.warning(
-                        "LinkedIn Jobs landing navigation timed out; continuing"
-                    )
 
-                if response is not None:
-                    BlockDetector.check("linkedin", page, response)
+            if response is not None:
+                BlockDetector.check("linkedin", page, response)
 
-                if not self._open_ai_search(page, query):
-                    self._save_debug(page, "search-input-missing")
-                    return []
+            app_logger.debug(f"LinkedIn actual URL: {page.url}")
 
-                results = self._extract_results(page)
+            # Wait for actual job links instead of waiting for a fixed amount of time.
+            try:
+                page.wait_for_selector(
+                    "a[href*='/jobs/view/']",
+                    timeout=self.RESULT_WAIT_TIMEOUT_MS,
+                )
+            except PlaywrightTimeoutError:
+                pass
+
+            results = self._extract_results(page)
+            app_logger.debug(f"LinkedIn initial job links: {len(results)}")
+
+            previous_count = len(results)
+            stalls = 0
+            for scroll_num in range(self.MAX_SCROLLS):
+                if len(results) >= self.JOB_LIMIT:
+                    break
+
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(self.SCROLL_WAIT_MS)
+                current = self._extract_results(page)
+                current_count = len(current)
                 app_logger.debug(
-                    f"LinkedIn initial job links: {len(results)} | url={page.url}"
+                    f"LinkedIn scroll {scroll_num + 1}: {current_count} job links"
                 )
 
-                previous_count = len(results)
-                stalls = 0
-                for scroll_num in range(self.MAX_SCROLLS):
-                    if len(results) >= self.JOB_LIMIT:
-                        break
+                if current_count <= previous_count:
+                    stalls += 1
+                else:
+                    results = current
+                    stalls = 0
 
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(self.SCROLL_WAIT_MS)
-                    current = self._extract_results(page)
-                    current_count = len(current)
-                    app_logger.debug(
-                        f"LinkedIn scroll {scroll_num + 1}: {current_count} job links"
-                    )
+                previous_count = current_count
+                if stalls >= self.MAX_CONSECUTIVE_STALLS:
+                    break
 
-                    if current_count <= previous_count:
-                        stalls += 1
-                    else:
-                        stalls = 0
-                        results = current
+            results = self._extract_results(page)
+            if not results:
+                self._save_debug(page, "zero-results")
+                app_logger.warning(
+                    f"LinkedIn returned zero job links | url={page.url}"
+                )
+                return []
 
-                    if stalls >= self.MAX_CONSECUTIVE_STALLS:
-                        break
-                    previous_count = current_count
+            jobs = []
+            seen_job_ids = set()
+            for result in results:
+                if len(jobs) >= self.JOB_LIMIT:
+                    break
 
-                results = self._extract_results(page)
-                if not results:
-                    self._save_debug(page, "zero-results")
-                    app_logger.warning(
-                        f"LinkedIn returned zero job links for query={query!r}; url={page.url}"
-                    )
-                    return []
+                job_id = result.get("job_id", "")
+                if not job_id or job_id in seen_job_ids:
+                    continue
+                seen_job_ids.add(job_id)
 
-                jobs = []
-                seen_job_ids = set()
-                for result in results:
-                    if len(jobs) >= self.JOB_LIMIT:
-                        break
+                text = (result.get("text") or "").lower()
+                link = result.get("href") or ""
+                if link.startswith("/"):
+                    link = "https://www.linkedin.com" + link
 
-                    job_id = result.get("job_id", "")
-                    if not job_id or job_id in seen_job_ids:
-                        continue
-                    seen_job_ids.add(job_id)
+                jobs.append({
+                    "platform": "linkedin",
+                    "job_id": job_id,
+                    "title": result.get("title") or "",
+                    "company": result.get("company") or "",
+                    "location": result.get("location") or "",
+                    "salary": "Not Disclosed",
+                    "experience": request.experience,
+                    "easy_apply": "easy apply" in text,
+                    "work_mode": (
+                        "Remote" if "remote" in text else
+                        "Hybrid" if "hybrid" in text else
+                        "On-site" if "on-site" in text or "onsite" in text else
+                        "Unknown"
+                    ),
+                    "job_url": link,
+                    "apply_url": "",
+                    "description": "",
+                    "company_logo": result.get("logo") or "",
+                    "posted_at": None,
+                    "posted_within": request.posted_within,
+                    "status": "NEW",
+                })
 
-                    text = (result.get("text") or "").lower()
-                    link = result.get("href") or ""
-                    if link.startswith("/"):
-                        link = "https://www.linkedin.com" + link
-
-                    jobs.append({
-                        "platform": "linkedin",
-                        "job_id": job_id,
-                        "title": result.get("title") or "",
-                        "company": result.get("company") or "",
-                        "location": result.get("location") or "",
-                        "salary": "Not Disclosed",
-                        "experience": request.experience,
-                        "easy_apply": "easy apply" in text,
-                        "work_mode": (
-                            "Remote" if "remote" in text else
-                            "Hybrid" if "hybrid" in text else
-                            "On-site" if "on-site" in text or "onsite" in text else
-                            "Unknown"
-                        ),
-                        "job_url": link,
-                        "apply_url": "",
-                        "description": "",
-                        "company_logo": result.get("logo") or "",
-                        "posted_at": None,
-                        "posted_within": request.posted_within,
-                        "status": "NEW",
-                    })
-
-                jobs = jobs[: self.JOB_LIMIT]
-                app_logger.info(f"TOTAL LINKEDIN JOBS SCRAPED: {len(jobs)}")
-                return jobs
-
-            except Exception:
+            jobs = jobs[: self.JOB_LIMIT]
+            app_logger.info(f"TOTAL LINKEDIN JOBS SCRAPED: {len(jobs)}")
+            return jobs
+        except Exception:
+            try:
                 self._save_debug(page, "error")
-                raise
+            except Exception:
+                pass
+            raise
         finally:
             browser.close()
