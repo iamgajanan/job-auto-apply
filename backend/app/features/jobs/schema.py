@@ -5,6 +5,7 @@ from uuid import UUID
 
 
 VALID_WORK_MODES = {"remote", "onsite", "hybrid", "any"}
+VALID_PLATFORMS = {"linkedin", "naukri"}
 
 
 class JobSearchRequest(BaseModel):
@@ -19,7 +20,15 @@ class JobSearchRequest(BaseModel):
     experience: Optional[str] = None
     work_mode: Optional[str] = "any"
     posted_within: Optional[str] = None
-    easy_apply: bool = False  # LinkedIn only — ignored by Naukri (no such concept)
+    easy_apply: bool = False
+
+    @field_validator("platform")
+    @classmethod
+    def validate_platform(cls, v):
+        v = v.strip().lower()
+        if v not in VALID_PLATFORMS:
+            raise ValueError(f"platform must be one of {sorted(VALID_PLATFORMS)}, got {v!r}")
+        return v
 
     @field_validator("work_mode")
     @classmethod

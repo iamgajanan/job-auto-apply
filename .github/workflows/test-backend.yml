@@ -1,0 +1,41 @@
+name: Test Backend
+
+on:
+  pull_request:
+    branches:
+      - just-scrapping
+    paths:
+      - "backend/**"
+      - "supabase/**"
+      - ".github/workflows/**"
+
+jobs:
+  python-checks:
+    name: Python syntax and app import
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Compile backend
+        run: python -m compileall -q backend/app
+
+      - name: Import FastAPI application
+        env:
+          APP_NAME: Job Auto Apply
+          APP_ENV: test
+          REDIS_URL: redis://localhost:6379
+          BACKEND_HOST: 0.0.0.0
+          BACKEND_PORT: 8004
+          DATABASE_URL: ""
+        run: python -c 'from app.main import app; print(app.title)'
+        working-directory: backend

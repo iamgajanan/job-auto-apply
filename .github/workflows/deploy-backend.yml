@@ -48,6 +48,13 @@ jobs:
         shell: bash
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          RAZORPAY_KEY_ID: ${{ secrets.RAZORPAY_KEY_ID }}
+          RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
+          RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+          CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
         run: |
           set -Eeuo pipefail
 
@@ -55,10 +62,14 @@ jobs:
           BACKEND_DIR="$APP_DIR/backend"
           VENV="$BACKEND_DIR/.venv/bin"
           BRANCH="just-scrapping"
+          AUTH_KEY="${SUPABASE_PUBLISHABLE_KEY:-}"
+          if [ -z "$AUTH_KEY" ]; then AUTH_KEY="${SUPABASE_ANON_KEY:-}"; fi
 
           test -d "$APP_DIR/.git" || { echo "ERROR: $APP_DIR is not a Git repository"; exit 1; }
           test -x "$VENV/python" || { echo "ERROR: backend virtualenv not found at $VENV"; exit 1; }
           test -n "$SUPABASE_DB_URL" || { echo "ERROR: SUPABASE_DB_URL secret is not available"; exit 1; }
+          test -n "$SUPABASE_URL" || { echo "ERROR: SUPABASE_URL secret is not available"; exit 1; }
+          test -n "$AUTH_KEY" || { echo "ERROR: SUPABASE_PUBLISHABLE_KEY (or legacy SUPABASE_ANON_KEY) secret is not available"; exit 1; }
 
           cd "$APP_DIR"
 
@@ -74,18 +85,38 @@ jobs:
           echo "==> Verifying FastAPI import"
           "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
 
-          echo "==> Updating runtime database configuration"
+          echo "==> Updating runtime configuration"
           cd "$APP_DIR"
-          SUPABASE_DB_URL="$SUPABASE_DB_URL" "$VENV/python" - <<'PY'
+          SUPABASE_DB_URL="$SUPABASE_DB_URL" \
+          SUPABASE_URL="$SUPABASE_URL" \
+          SUPABASE_PUBLISHABLE_KEY="$AUTH_KEY" \
+          RAZORPAY_KEY_ID="$RAZORPAY_KEY_ID" \
+          RAZORPAY_KEY_SECRET="$RAZORPAY_KEY_SECRET" \
+          RAZORPAY_WEBHOOK_SECRET="$RAZORPAY_WEBHOOK_SECRET" \
+          CORS_ORIGINS="$CORS_ORIGINS" \
+          "$VENV/python" - <<'PY'
           import os
           from pathlib import Path
 
           env_path = Path("/home/iamgajanan/Projects/job-auto-apply/.env")
-          database_url = os.environ["SUPABASE_DB_URL"]
           lines = env_path.read_text().splitlines() if env_path.exists() else []
-          filtered = [line for line in lines if not line.startswith("DATABASE_URL=")]
-          filtered.append(f"DATABASE_URL={database_url}")
-          env_path.write_text("\n".join(filtered) + "\n")
+          managed = {
+              "DATABASE_URL": os.environ["SUPABASE_DB_URL"],
+              "SUPABASE_URL": os.environ["SUPABASE_URL"],
+              "SUPABASE_PUBLISHABLE_KEY": os.environ["SUPABASE_PUBLISHABLE_KEY"],
+              "RAZORPAY_KEY_ID": os.environ.get("RAZORPAY_KEY_ID", ""),
+              "RAZORPAY_KEY_SECRET": os.environ.get("RAZORPAY_KEY_SECRET", ""),
+              "RAZORPAY_WEBHOOK_SECRET": os.environ.get("RAZORPAY_WEBHOOK_SECRET", ""),
+          }
+          if os.environ.get("CORS_ORIGINS"):
+              managed["CORS_ORIGINS"] = os.environ["CORS_ORIGINS"]
+
+          remaining = [
+              line for line in lines
+              if line.split("=", 1)[0] not in managed
+          ]
+          remaining.extend(f"{key}={value}" for key, value in managed.items())
+          env_path.write_text("\n".join(remaining) + "\n")
           env_path.chmod(0o600)
           PY
 

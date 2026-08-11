@@ -16,17 +16,29 @@ class Settings(BaseSettings):
     BACKEND_HOST: str
     BACKEND_PORT: int
 
-    JWT_SECRET: str
-    JWT_ALGORITHM: str
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int
+    # Legacy app JWT settings are kept for compatibility with existing config.
+    # User authentication is handled by Supabase Auth and its access tokens.
+    JWT_SECRET: str = ""
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
-    # Comma-separated list, e.g. "http://localhost:3000,https://app.example.com"
+    # Supabase Auth. Prefer the new publishable key; legacy anon is supported
+    # during the 2026 API-key migration period.
+    SUPABASE_URL: str = ""
+    SUPABASE_PUBLISHABLE_KEY: str = ""
+    SUPABASE_ANON_KEY: str = ""
+
+    # Razorpay. Secrets stay on the Raspberry Pi runtime and are never sent to the frontend.
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""
+
     CORS_ORIGINS: str = "http://localhost:3000"
-
-    # Optional HTTP(S) proxy for Naukri/LinkedIn scraping, e.g.
-    # "http://user:pass@p.webshare.io:80". Leave blank/unset to scrape
-    # directly from this machine's own IP (the normal local setup).
     SCRAPER_PROXY_URL: str = ""
+
+    @property
+    def supabase_auth_key(self) -> str:
+        return self.SUPABASE_PUBLISHABLE_KEY or self.SUPABASE_ANON_KEY
 
     @property
     def cors_origins_list(self) -> list[str]:
