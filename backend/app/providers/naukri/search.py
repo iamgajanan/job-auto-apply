@@ -1,3 +1,4 @@
+import hashlib
 import re
 import time
 from pathlib import Path
@@ -6,22 +7,11 @@ from app.providers.common.browser import BrowserManager
 from app.gateway.humanizer import Humanizer
 from app.gateway.block_detector import BlockDetector, PlatformAccessError
 from app.core.logger import app_logger
-
 from app.providers.base import BaseProvider, ProviderCapabilities
 from app.config.settings import settings
 
 NAUKRI_PROFILE = "browser-data-naukri"
-
-# Naukri's markup gets tweaked periodically. We try candidate selectors
-# in order and use whichever one actually matches on the page, instead
-# of hard-coding a single class name that silently returns nothing the
-# next time Naukri ships a redesign.
-CARD_SELECTORS = [
-    "div.srp-jobtuple-wrapper",
-    "div.cust-job-tuple",
-    "article.jobTuple",
-]
-
+CARD_SELECTORS = ["div.srp-jobtuple-wrapper", "div.cust-job-tuple", "article.jobTuple"]
 TITLE_SELECTORS = ["a.title", ".title.ellipsis"]
 COMPANY_SELECTORS = ["a.comp-name", ".comp-name", ".subTitle"]
 LOCATION_SELECTORS = ["span.locWdth", ".loc-wrap span", ".location"]
@@ -30,37 +20,20 @@ SALARY_SELECTORS = ["span.sal-wrap span", ".sal", ".salary"]
 POSTED_SELECTORS = ["span.job-post-day", ".job-post-day"]
 DESCRIPTION_SELECTORS = ["span.job-desc", ".job-description"]
 
-
 class NaukriSearch(BaseProvider):
     name = "naukri"
-
-    capabilities = ProviderCapabilities(
-        easy_apply=False,
-        remote=True,
-        salary=True,
-        login=True,
-    )
-
+    capabilities = ProviderCapabilities(easy_apply=False, remote=True, salary=True, login=True)
     JOB_LIMIT = 100
-    PROXY_URL = settings.SCRAPER_PROXY_URL or None  # from .env, or set externally by Apify actor
-    PAGE_SIZE = 20          # Naukri's approx cards-per-page
+    PROXY_URL = settings.SCRAPER_PROXY_URL or None
+    PAGE_SIZE = 20
     MAX_PAGES = 6
     POST_NAV_WAIT_MS = 2500
-
-    # Save a screenshot + the raw HTML of the first page whenever we
-    # come back with zero parsed jobs, so it's easy to see *why* --
-    # is it a captcha, a login wall, or just a selector that changed --
-    # instead of guessing blind.
     DEBUG_DIR = Path(__file__).resolve().parents[3] / "debug"
 
     def _first_match(self, card, selectors):
         for sel in selectors:
             try:
                 loc = card.locator(sel)
-                # count() is instant (no actionability wait). Only call
-                # text_content() -- which DOES wait up to the default
-                # timeout if nothing matches -- when we know something
-                # is actually there.
                 if loc.count() == 0:
                     continue
                 text = loc.first.text_content(timeout=1000)
@@ -85,16 +58,10 @@ class NaukriSearch(BaseProvider):
     def _save_debug(self, page, tag: str):
         try:
             self.DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-            page.screenshot(
-                path=str(self.DEBUG_DIR / f"naukri-{tag}.png"),
-                full_page=True,
-            )
-            (self.DEBUG_DIR / f"naukri-{tag}.html").write_text(
-                page.content(), encoding="utf-8"
-            )
+            page.screenshot(path=str(self.DEBUG_DIR / f"naukri-{tag}.png"), full_page=True)
+            (self.DEBUG_DIR / f"naukri-{tag}.html").write_text(page.content(), encoding="utf-8")
         except Exception as e:
             app_logger.warning(f"Naukri debug save failed: {e}")
-
 
     def _requested_years(self, value):
         if not value or str(value).strip().lower() in {"any", "all"}:
@@ -111,8 +78,7 @@ class NaukriSearch(BaseProvider):
             return False
         if len(nums) == 1:
             return years >= nums[0]
-        low, high = nums[0], nums[1]
-        return low <= years <= high
+        return nums[0] <= years <= nums[1]
 
     def _posted_days(self, posted: str):
         text = (posted or "").strip().lower()
@@ -135,8 +101,7 @@ class NaukriSearch(BaseProvider):
         value = (requested or "").strip().lower()
         if value in {"", "any", "all"}:
             return True
-        limits = {"day": 1, "24h": 1, "week": 7, "month": 30}
-        limit = limits.get(value)
+        limit = {"day": 1, "24h": 1, "week": 7, "month": 30}.get(value)
         if limit is None:
             return True
         days = self._posted_days(posted)
@@ -150,61 +115,57 @@ class NaukriSearch(BaseProvider):
             return "Hybrid"
         if any(marker in text for marker in ("on-site", "onsite", "on site", "work from office", "wfo")):
             return "On-site"
-        # Do not guess On-site when Naukri does not publish a work mode.
-        # Unknown jobs can still be returned for work_mode=any, but they
-        # must not pass an explicit On-site/Remote/Hybrid request.
         return "Unknown"
 
     def _work_mode_matches(self, actual: str, request) -> bool:
         requested = (request.work_mode or "any").strip().lower()
         if requested in {"", "any", "all"}:
             return True
-        aliases = {"onsite": "on-site", "on site": "on-site"}
-        requested = aliases.get(requested, requested)
-
-        actual_lower = actual.lower()
-
-        # Naukri almost never labels a card "on-site" explicitly -- it's
-        # the unstated default. Only Remote/Hybrid jobs bother to say so.
-        # A card with no explicit work-mode text ("Unknown") is therefore
-        # treated as on-site-compatible, or this filter would return
-        # near-zero results for the majority real-world case.
-        if requested == "on-site" and actual_lower == "unknown":
+        requested = {"onsite": "on-site", "on site": "on-site"}.get(requested, requested)
+        if requested == "on-site" and actual.lower() == "unknown":
             return True
+        return actual.lower() == requested
 
-        return actual_lower == requested
+    def _job_id_from_link(self, link: str) -> str:
+        if not link:
+            return ""
+        match = re.search(r"(?:-|/)(\d{5,})(?:[/?#-]|$)", link)
+        if match:
+            return match.group(1)
+        return hashlib.sha1(link.encode("utf-8")).hexdigest()[:20]
+
+    def _extract_job_link(self, card) -> str:
+        selectors = ["a.title", 'a[href*="/job-listings/"]', 'a[href*="/job/"]', "a[href]"]
+        for sel in selectors:
+            try:
+                loc = card.locator(sel)
+                if loc.count() == 0:
+                    continue
+                href = loc.first.get_attribute("href", timeout=1000) or ""
+                if href.strip():
+                    return href.strip()
+            except Exception:
+                continue
+        return ""
+
+    def _fallback_job_id(self, title, company, location, link):
+        raw = "|".join((title or "", company or "", location or "", link or "")).strip().lower()
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20] if raw else ""
 
     def search(self, request):
-
         browser = BrowserManager(profile_name=NAUKRI_PROFILE)
-        # block_resources=False -- Naukri sits behind Akamai bot
-        # management, which flags pages that never load a stylesheet,
-        # font, or image as a strong bot signal. Loading everything
-        # like a real browser matters more here than scrape speed.
         if self.PROXY_URL:
-            masked = self.PROXY_URL.split("@")[-1]  # hide credentials in logs
-            app_logger.info(f"Naukri scraping via PROXY: {masked}")
+            app_logger.info(f"Naukri scraping via PROXY: {self.PROXY_URL.split('@')[-1]}")
         else:
             app_logger.info("Naukri scraping via DIRECT connection (no proxy)")
-
         try:
             page = browser.launch(block_resources=False, proxy_url=self.PROXY_URL)
-
-            keyword_slug = self._slugify(request.job_title)
-            location_slug = self._slugify(request.location)
-
-            base_path = f"https://www.naukri.com/{keyword_slug}-jobs-in-{location_slug}"
-
-            jobs = []
-            seen_job_ids = set()
+            base_path = f"https://www.naukri.com/{self._slugify(request.job_title)}-jobs-in-{self._slugify(request.location)}"
+            jobs, seen_job_ids = [], set()
             start_time = time.time()
-
             for page_num in range(self.MAX_PAGES):
-
                 url = base_path if page_num == 0 else f"{base_path}-{page_num + 1}"
-
                 app_logger.debug(f"Naukri page {page_num + 1} | {url}")
-
                 try:
                     response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     BlockDetector.check("naukri", page, response)
@@ -213,41 +174,25 @@ class NaukriSearch(BaseProvider):
                 except Exception as e:
                     app_logger.warning(f"Naukri navigation failed: {e}")
                     raise
-
                 Humanizer.think(page)
-
                 cards, used_selector = self._find_cards(page)
-
                 try:
                     page.wait_for_selector(used_selector, timeout=self.POST_NAV_WAIT_MS)
                 except Exception:
                     page.wait_for_timeout(self.POST_NAV_WAIT_MS)
-
                 cards, used_selector = self._find_cards(page)
                 count = cards.count()
-
                 app_logger.debug(f"Naukri page {page_num + 1}: {count} cards via '{used_selector}'")
-
                 if count == 0:
                     BlockDetector.check("naukri", page, response)
                     if page_num == 0:
                         self._save_debug(page, "zero-results")
                     break
-
                 page_new_count = 0
-
                 for i in range(count):
-
                     if len(jobs) >= self.JOB_LIMIT:
                         break
-
                     card = cards.nth(i)
-
-                    # Prefer a data-job-id attribute directly on the card if
-                    # Naukri exposes one; otherwise fall back to parsing it
-                    # out of the job's URL.
-                    job_id = card.get_attribute("data-job-id") or ""
-
                     title = self._first_match(card, TITLE_SELECTORS)
                     company = self._first_match(card, COMPANY_SELECTORS)
                     location = self._first_match(card, LOCATION_SELECTORS)
@@ -255,92 +200,27 @@ class NaukriSearch(BaseProvider):
                     salary = self._first_match(card, SALARY_SELECTORS)
                     posted = self._first_match(card, POSTED_SELECTORS)
                     description = self._first_match(card, DESCRIPTION_SELECTORS)
-
-                    try:
-                        title_link = card.locator("a.title")
-                        link = (
-                            title_link.first.get_attribute("href", timeout=1000)
-                            if title_link.count() > 0
-                            else ""
-                        ) or ""
-                    except Exception:
-                        link = ""
-
-                    if not link:
-                        try:
-                            any_link = card.locator("a")
-                            link = (
-                                any_link.first.get_attribute("href", timeout=1000)
-                                if any_link.count() > 0
-                                else ""
-                            ) or ""
-                        except Exception:
-                            link = ""
-
-                    if not job_id and link:
-                        match = re.search(r"-(\d{6,})(?:\?|$)", link)
-                        if match:
-                            job_id = match.group(1)
-
+                    link = self._extract_job_link(card)
+                    job_id = card.get_attribute("data-job-id") or self._job_id_from_link(link)
                     if not job_id:
-                        # No reliable unique id -- skip rather than risk a
-                        # duplicate/blank job_id violating the DB's unique
-                        # constraint (same approach as the LinkedIn provider).
+                        job_id = self._fallback_job_id(title, company, location, link)
+                    if not job_id or job_id in seen_job_ids:
                         continue
-
-                    if job_id in seen_job_ids:
-                        continue
-
                     seen_job_ids.add(job_id)
-
-                    text_blob = (card.text_content() or "").lower()
-                    work_mode = self._detect_work_mode(text_blob)
-
-                    # Naukri does not expose stable URL parameters for every
-                    # API filter we accept. Enforce correctness on the parsed
-                    # cards so the response always respects the request.
+                    work_mode = self._detect_work_mode(card.text_content() or "")
                     if not self._work_mode_matches(work_mode, request):
                         continue
                     if not self._experience_matches(experience, request.experience):
                         continue
                     if not self._posted_matches(posted, request.posted_within):
                         continue
-
-                    jobs.append(
-                        {
-                            "platform": "naukri",
-                            "job_id": job_id,
-                            "title": title,
-                            "company": company,
-                            "location": location or request.location,
-                            "salary": salary or "Not Disclosed",
-                            "experience": experience or request.experience,
-                            "easy_apply": False,
-                            "work_mode": work_mode,
-                            "job_url": link,
-                            "apply_url": "",
-                            "description": description,
-                            "company_logo": "",
-                            "posted_at": None,
-                            "posted_within": posted or request.posted_within,
-                            "status": "NEW",
-                        }
-                    )
-
+                    jobs.append({"platform": "naukri", "job_id": job_id, "title": title, "company": company, "location": location or request.location, "salary": salary or "Not Disclosed", "experience": experience or request.experience, "easy_apply": False, "work_mode": work_mode, "job_url": link, "apply_url": "", "description": description, "company_logo": "", "posted_at": None, "posted_within": posted or request.posted_within, "status": "NEW"})
                     page_new_count += 1
-
                 app_logger.debug(f"Naukri page {page_num + 1} added {page_new_count} new jobs. Total: {len(jobs)}")
-
-                if len(jobs) >= self.JOB_LIMIT:
+                if len(jobs) >= self.JOB_LIMIT or page_new_count == 0:
                     break
-
-                if page_new_count == 0:
-                    break
-
                 Humanizer.random_delay(page)
-
             app_logger.info(f"TOTAL NAUKRI JOBS SCRAPED: {len(jobs)} (took {time.time() - start_time:.1f}s)")
-
             return jobs
         finally:
             browser.close()
