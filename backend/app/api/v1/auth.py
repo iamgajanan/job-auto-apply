@@ -1,18 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
+from sqlalchemy import text
 
-from app.auth.dependencies import bearer_scheme, get_current_user
+from app.auth.dependencies import bearer_scheme, get_current_user, load_profile
 from app.auth.schemas import (
     AuthResponse,
+    CurrentUser,
     LoginRequest,
+    PasswordResetRequest,
+    PasswordUpdateRequest,
     RefreshRequest,
     Session,
     SignupRequest,
-    CurrentUser,
 )
 from app.auth.service import SupabaseAuthError, auth_service
 from app.db.connection import get_engine
-from sqlalchemy import text
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -29,7 +31,9 @@ def _session(payload: dict) -> Session | None:
     )
 
 
-def _profile_for_user(user_id: str):
+def _profile_for_user(user_id: str, email: str | None = None, full_name: str | None = None):
+    from app.auth.schemas import UserProfile
+
     with get_engine().connect() as connection:
         row = connection.execute(
             text(
@@ -40,20 +44,20 @@ def _profile_for_user(user_id: str):
                 """
             ),
             {"id": user_id},
-        ).mappings().one()
-    from app.auth.schemas import UserProfile
+        ).mappings().one_or_none()
 
-    return UserProfile(**dict(row))
+    if row:
+        return UserProfile(**dict(row))
+
+    from uuid import UUID
+
+    return load_profile(UUID(user_id), email, full_name)
 
 
 @router.post("/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 def signup(request: SignupRequest):
     try:
-        payload = auth_service.signup(
-            request.email.lower(),
-            request.password,
-            request.full_name,
-        )
+        payload = auth_service.signup(request.email.lower(), request.password, request.full_name)
     except SupabaseAuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -62,8 +66,7 @@ def signup(request: SignupRequest):
     if not user_id:
         raise HTTPException(status_code=502, detail="Supabase did not return a user")
 
-    # The database trigger creates the free profile/quota atomically.
-    profile = _profile_for_user(user_id)
+    profile = _profile_for_user(user_id, user.get("email"), request.full_name)
     return AuthResponse(
         user=profile,
         session=_session(payload),
@@ -76,14 +79,23 @@ def login(request: LoginRequest):
     try:
         payload = auth_service.login(request.email.lower(), request.password)
     except SupabaseAuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail="Invalid email or password") from exc
+        # Do not reveal whether an email exists.
+        raise HTTPException(status_code=401, detail="Invalid email or password") from exc
 
     user = payload.get("user") or {}
     if not user.get("id"):
         raise HTTPException(status_code=502, detail="Supabase did not return a user")
 
-    # get_current_user performs the same role/status synchronization on the next protected call.
-    profile = _profile_for_user(user["id"])
+    profile = _profile_for_user(user["id"], user.get("email"), (user.get("user_metadata") or {}).get("full_name"))
+    if profile.status != "active":
+        raise HTTPException(status_code=403, detail="Account is not active")
+
+    # Refresh the admin allowlist-derived role on every login.
+    profile = load_profile(
+        __import__("uuid").UUID(user["id"]),
+        user.get("email"),
+        (user.get("user_metadata") or {}).get("full_name"),
+    )
     return AuthResponse(user=profile, session=_session(payload))
 
 
@@ -98,6 +110,29 @@ def refresh(request: RefreshRequest):
     if not session:
         raise HTTPException(status_code=502, detail="Supabase did not return a refreshed session")
     return session
+
+
+@router.post("/password-reset", status_code=status.HTTP_202_ACCEPTED)
+def password_reset(request: PasswordResetRequest):
+    try:
+        auth_service.request_password_reset(request.email.lower(), request.redirect_to)
+    except SupabaseAuthError:
+        # Do not leak account existence or email-delivery details.
+        pass
+    return {"message": "If the account exists, password reset instructions will be sent."}
+
+
+@router.put("/password", status_code=status.HTTP_204_NO_CONTENT)
+def update_password(
+    request: PasswordUpdateRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+):
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        auth_service.update_password(credentials.credentials, request.password)
+    except SupabaseAuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail="Unable to update password") from exc
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
