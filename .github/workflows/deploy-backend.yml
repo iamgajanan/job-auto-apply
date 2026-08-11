@@ -1,0 +1,72 @@
+name: Deploy Backend to Raspberry Pi
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: job-auto-apply-backend-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy FastAPI backend
+    runs-on: [self-hosted, linux, arm64, job-auto-apply]
+
+    steps:
+      - name: Deploy latest main
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          APP_DIR="/home/iamgajanan/Projects/job-auto-apply"
+          BACKEND_DIR="$APP_DIR/backend"
+          VENV="$BACKEND_DIR/.venv/bin"
+
+          if [[ ! -d "$APP_DIR/.git" ]]; then
+            echo "ERROR: $APP_DIR is not a Git repository"
+            exit 1
+          fi
+
+          if [[ ! -x "$VENV/python" ]]; then
+            echo "ERROR: Backend virtualenv not found at $VENV"
+            exit 1
+          fi
+
+          cd "$APP_DIR"
+
+          echo "==> Fetching latest main"
+          git fetch --prune origin main
+          git checkout main
+          git reset --hard origin/main
+
+          echo "==> Installing backend dependencies"
+          cd "$BACKEND_DIR"
+          "$VENV/python" -m pip install --disable-pip-version-check -r requirements.txt
+
+          echo "==> Verifying FastAPI imports"
+          "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
+
+          echo "==> Restarting backend service"
+          if ! sudo -n systemctl restart job-auto-apply.service; then
+            echo "ERROR: Could not restart job-auto-apply.service without a password."
+            echo "Configure sudoers for the GitHub runner user before enabling deployment."
+            exit 1
+          fi
+
+          echo "==> Waiting for backend on port 8004"
+          for i in {1..30}; do
+            if curl -fsS --max-time 3 http://127.0.0.1:8004/ >/tmp/job-auto-apply-health.json; then
+              echo "Backend health check passed:"
+              cat /tmp/job-auto-apply-health.json
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "ERROR: Backend did not become healthy on port 8004"
+          sudo -n systemctl --no-pager --full status job-auto-apply.service || true
+          sudo -n journalctl -u job-auto-apply.service -n 80 --no-pager || true
+          exit 1
