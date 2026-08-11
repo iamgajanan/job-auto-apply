@@ -1,0 +1,16 @@
+[Unit]
+Description=Job Auto Apply FastAPI Backend
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iamgajanan
+WorkingDirectory=/home/iamgajanan/Projects/job-auto-apply/backend
+EnvironmentFile=/home/iamgajanan/Projects/job-auto-apply/.env
+ExecStart=/home/iamgajanan/Projects/job-auto-apply/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8004
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
