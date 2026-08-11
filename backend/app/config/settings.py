@@ -11,6 +11,8 @@ class Settings(BaseSettings):
 
     REDIS_URL: str
 
+    DATABASE_URL: str = ""
+
     BACKEND_HOST: str
     BACKEND_PORT: int
 
