@@ -14,11 +14,7 @@ class SupabaseAuthError(RuntimeError):
 
 
 class SupabaseAuthService:
-    """Small server-side adapter around Supabase Auth's HTTP API.
-
-    Passwords never enter our database or application logs. Supabase Auth owns
-    credentials, sessions, email confirmation, and password reset flows.
-    """
+    """Server-side adapter around Supabase Auth's HTTP API."""
 
     def _require_config(self) -> None:
         if not settings.SUPABASE_URL or not settings.SUPABASE_ANON_KEY:
@@ -98,6 +94,20 @@ class SupabaseAuthService:
             "POST",
             "/token?grant_type=refresh_token",
             json={"refresh_token": refresh_token},
+        )
+
+    def request_password_reset(self, email: str, redirect_to: str | None) -> None:
+        body: dict[str, Any] = {"email": email}
+        if redirect_to:
+            body["redirect_to"] = redirect_to
+        self._request("POST", "/recover", json=body)
+
+    def update_password(self, access_token: str, password: str) -> dict[str, Any]:
+        return self._request(
+            "PUT",
+            "/user",
+            json={"password": password},
+            access_token=access_token,
         )
 
     def get_user(self, access_token: str) -> dict[str, Any]:
