@@ -35,8 +35,6 @@ def verify_payment(
     request: VerifyPaymentRequest,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    # The service deliberately looks up the order by user + server-side order id
-    # before fulfilling anything. Browser-provided values are never trusted alone.
     return payment_service.finalize_payment(
         current_user.id,
         request.razorpay_order_id,
@@ -46,7 +44,7 @@ def verify_payment(
 
 
 @router.post("/webhook")
-def razorpay_webhook(
+async def razorpay_webhook(
     http_request: Request,
     x_razorpay_signature: str | None = Header(default=None),
 ):
@@ -55,18 +53,7 @@ def razorpay_webhook(
     if not x_razorpay_signature:
         raise HTTPException(status_code=400, detail="Missing Razorpay webhook signature")
 
-    raw_body = http_request.scope.get("raw_body")
-    # Starlette does not expose raw_body on the scope by default, so read it here.
-    # The Request body is cached by Starlette and remains safe to parse afterwards.
-    import asyncio
-
-    try:
-        raw_body = asyncio.run(http_request.body()) if not raw_body else raw_body
-    except RuntimeError:
-        # FastAPI normally executes sync endpoints in a worker thread, where there
-        # is no running event loop.
-        raw_body = http_request._body if hasattr(http_request, "_body") else b""
-
+    raw_body = await http_request.body()
     expected = hmac.new(
         settings.RAZORPAY_WEBHOOK_SECRET.encode("utf-8"),
         raw_body,
@@ -93,7 +80,7 @@ def razorpay_webhook(
         row = connection.execute(
             text(
                 """
-                select user_id, provider_signature
+                select user_id
                 from public.payments
                 where provider = 'razorpay' and provider_order_id = :order_id
                 """
@@ -104,13 +91,10 @@ def razorpay_webhook(
     if not row:
         return {"received": True, "processed": False}
 
-    # Webhooks do not include the Checkout signature. Fulfilment is still
-    # protected by Razorpay's webhook signature plus the server-side payment
-    # status/amount/order verification in finalize_payment.
     result = payment_service.finalize_payment(
         str(row["user_id"]),
         order_id,
         payment_id,
-        row["provider_signature"] or "",
+        None,
     )
     return {"received": True, "processed": True, "result": result}
