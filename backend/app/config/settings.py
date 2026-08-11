@@ -22,8 +22,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
-    # Supabase Auth
+    # Supabase Auth. Prefer the new publishable key; legacy anon is supported
+    # during the 2026 API-key migration period.
     SUPABASE_URL: str = ""
+    SUPABASE_PUBLISHABLE_KEY: str = ""
     SUPABASE_ANON_KEY: str = ""
 
     # Razorpay. Secrets stay on the Raspberry Pi runtime and are never sent to the frontend.
@@ -31,11 +33,12 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_SECRET: str = ""
     RAZORPAY_WEBHOOK_SECRET: str = ""
 
-    # Comma-separated list, e.g. "http://localhost:3000,https://app.example.com"
     CORS_ORIGINS: str = "http://localhost:3000"
-
-    # Optional HTTP(S) proxy for Naukri/LinkedIn scraping.
     SCRAPER_PROXY_URL: str = ""
+
+    @property
+    def supabase_auth_key(self) -> str:
+        return self.SUPABASE_PUBLISHABLE_KEY or self.SUPABASE_ANON_KEY
 
     @property
     def cors_origins_list(self) -> list[str]:
