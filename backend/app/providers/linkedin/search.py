@@ -12,7 +12,6 @@ from app.config.settings import settings
 
 
 class LinkedInSearch(BaseProvider):
-
     name = "linkedin"
 
     capabilities = ProviderCapabilities(
@@ -59,129 +58,156 @@ class LinkedInSearch(BaseProvider):
         except Exception as e:
             app_logger.warning(f"LinkedIn debug save failed: {e}")
 
-    def _job_elements(self, page):
-        """Return unique result elements using several LinkedIn DOM variants."""
-        links = page.locator(", ".join(self.JOB_LINK_SELECTORS))
-        if links.count():
-            elements = []
-            seen = set()
-            for i in range(links.count()):
-                link = links.nth(i)
-                try:
-                    href = link.get_attribute("href") or ""
-                    job_id = self._extract_job_id(href)
-                    if not job_id or job_id in seen:
-                        continue
-                    seen.add(job_id)
-                    card = link.locator(
-                        "xpath=ancestor::*[self::li or contains(@class,'job-card') or contains(@class,'base-card')][1]"
-                    )
-                    if card.count():
-                        elements.append(card.first)
-                    else:
-                        elements.append(link)
-                except Exception:
-                    continue
-            if elements:
-                return elements
-
-        for selector in self.CARD_SELECTORS:
-            cards = page.locator(selector)
-            if cards.count():
-                return [cards.nth(i) for i in range(cards.count())]
-        return []
-
     @staticmethod
     def _extract_job_id(link: str) -> str:
         if not link:
             return ""
         if "/jobs/view/" in link:
-            try:
-                return link.split("/jobs/view/", 1)[1].split("/", 1)[0].split("?", 1)[0]
-            except Exception:
-                return ""
+            return link.split("/jobs/view/", 1)[1].split("/", 1)[0].split("?", 1)[0]
         return ""
 
-    @staticmethod
-    def _first_text(element, selectors) -> str:
-        for selector in selectors:
+    def _extract_results(self, page):
+        """Extract job results in one browser-side pass to avoid locator timeouts."""
+        return page.evaluate(
+            """
+            () => {
+                const selectors = [
+                    "a[href*='/jobs/view/']",
+                    "a[href*='/jobs/collections/']"
+                ];
+                const links = [];
+                const seen = new Set();
+
+                for (const selector of selectors) {
+                    for (const link of document.querySelectorAll(selector)) {
+                        const href = link.href || link.getAttribute('href') || '';
+                        const match = href.match(/\/jobs\/view\/([^/?#]+)/);
+                        if (!match || seen.has(match[1])) continue;
+                        seen.add(match[1]);
+
+                        let root = link;
+                        for (let i = 0; i < 6 && root.parentElement; i++) {
+                            const parent = root.parentElement;
+                            const cls = String(parent.className || '');
+                            if (
+                                parent.tagName === 'LI' ||
+                                parent.tagName === 'ARTICLE' ||
+                                /job-card|base-card|search-result|list-item/i.test(cls)
+                            ) {
+                                root = parent;
+                                break;
+                            }
+                            root = parent;
+                        }
+
+                        const text = (root.innerText || link.innerText || '').trim();
+                        const pick = (sels) => {
+                            for (const s of sels) {
+                                const el = root.querySelector(s);
+                                const value = el?.innerText?.trim();
+                                if (value) return value;
+                            }
+                            return '';
+                        };
+
+                        links.push({
+                            job_id: match[1],
+                            href,
+                            text,
+                            title: pick([
+                                'h3', 'h2', 'strong',
+                                '.base-search-card__title',
+                                '.job-card-list__title',
+                                '[class*="job-card-list__title"]',
+                                '[class*="search-card__title"]'
+                            ]),
+                            company: pick([
+                                '.artdeco-entity-lockup__subtitle',
+                                '.base-search-card__subtitle',
+                                '.job-card-container__company-name',
+                                '[class*="company-name"]'
+                            ]),
+                            location: pick([
+                                '.artdeco-entity-lockup__caption',
+                                '.job-search-card__location',
+                                '.base-search-card__metadata',
+                                '[class*="location"]'
+                            ]),
+                            logo: root.querySelector('img')?.src || ''
+                        });
+                    }
+                }
+                return links;
+            }
+            """
+        )
+
+    def _build_url(self, request, start_offset: int) -> str:
+        keyword = quote(request.job_title or "")
+        location = quote(request.location or "")
+        url = (
+            f"https://www.linkedin.com/jobs/search/"
+            f"?keywords={keyword}&location={location}"
+        )
+
+        if request.easy_apply:
+            url += "&f_AL=true"
+
+        mode = (request.work_mode or "any").lower()
+        if mode == "remote":
+            url += "&f_WT=2"
+        elif mode == "hybrid":
+            url += "&f_WT=3"
+        elif mode in {"onsite", "on-site", "on site"}:
+            url += "&f_WT=1"
+
+        if request.experience:
             try:
-                value = element.locator(selector).first.text_content()
-                if value and value.strip():
-                    return value.strip()
-            except Exception:
-                continue
-        return ""
+                years = int(request.experience.split()[0])
+                if years <= 2:
+                    url += "&f_E=1"
+                elif years <= 5:
+                    url += "&f_E=3"
+                elif years <= 10:
+                    url += "&f_E=4"
+                else:
+                    url += "&f_E=5"
+            except (ValueError, IndexError):
+                pass
+
+        posted = (request.posted_within or "").lower()
+        if posted == "day":
+            url += "&f_TPR=r86400"
+        elif posted == "week":
+            url += "&f_TPR=r604800"
+        elif posted == "month":
+            url += "&f_TPR=r2592000"
+
+        return f"{url}&start={start_offset}"
 
     def search(self, request):
         browser = BrowserManager()
 
         if self.PROXY_URL:
-            masked = self.PROXY_URL.split("@")[-1]
-            app_logger.info(f"LinkedIn scraping via PROXY: {masked}")
+            app_logger.info(
+                f"LinkedIn scraping via PROXY: {self.PROXY_URL.split('@')[-1]}"
+            )
         else:
             app_logger.info("LinkedIn scraping via DIRECT connection (no proxy)")
 
         try:
             page = browser.launch(proxy_url=self.PROXY_URL)
-
-            keyword = quote(request.job_title or "")
-            location = quote(request.location or "")
-            base_url = (
-                f"https://www.linkedin.com/jobs/search/"
-                f"?keywords={keyword}&location={location}"
-            )
-
-            if request.easy_apply:
-                base_url += "&f_AL=true"
-
-            mode = (request.work_mode or "any").lower()
-            if mode == "remote":
-                base_url += "&f_WT=2"
-            elif mode == "hybrid":
-                base_url += "&f_WT=3"
-            elif mode in ["onsite", "on-site", "on site"]:
-                base_url += "&f_WT=1"
-
-            if request.experience:
-                try:
-                    years = int(request.experience.split()[0])
-                    if years <= 2:
-                        base_url += "&f_E=1"
-                    elif years <= 5:
-                        base_url += "&f_E=3"
-                    elif years <= 10:
-                        base_url += "&f_E=4"
-                    else:
-                        base_url += "&f_E=5"
-                except Exception:
-                    pass
-
-            if request.posted_within:
-                posted = request.posted_within.lower()
-                if posted == "day":
-                    base_url += "&f_TPR=r86400"
-                elif posted == "week":
-                    base_url += "&f_TPR=r604800"
-                elif posted == "month":
-                    base_url += "&f_TPR=r2592000"
-
             jobs = []
             seen_job_ids = set()
 
             for page_num in range(self.MAX_PAGES):
-                page_start_time = time.time()
+                page_start = time.time()
                 start_offset = page_num * self.PAGE_SIZE
-                url = base_url + f"&start={start_offset}"
+                url = self._build_url(request, start_offset)
                 app_logger.debug(
                     f"LinkedIn page {page_num + 1} | start={start_offset} | {url}"
                 )
 
-                # Do not make the whole request depend on DOMContentLoaded.
-                # LinkedIn can keep loading secondary resources for a long time,
-                # especially through a proxy. `commit` gives us the response as
-                # soon as navigation commits, after which we wait briefly for
-                # the actual result DOM.
                 try:
                     response = page.goto(
                         url,
@@ -190,13 +216,10 @@ class LinkedInSearch(BaseProvider):
                     )
                 except PlaywrightTimeoutError:
                     app_logger.warning(
-                        f"LinkedIn navigation exceeded {self.NAVIGATION_TIMEOUT_MS}ms; "
-                        "continuing with the current page instead of failing the API request"
+                        f"LinkedIn navigation exceeded {self.NAVIGATION_TIMEOUT_MS}ms; continuing"
                     )
                     response = None
 
-                # DOMContentLoaded is useful but is not required for the scraper.
-                # Never turn a slow secondary resource into a 500 response.
                 try:
                     page.wait_for_load_state(
                         "domcontentloaded",
@@ -210,88 +233,78 @@ class LinkedInSearch(BaseProvider):
                 if response is not None:
                     BlockDetector.check("linkedin", page, response)
 
-                app_logger.debug(f"goto/load took {time.time() - page_start_time:.2f}s")
+                app_logger.debug(f"goto/load took {time.time() - page_start:.2f}s")
 
                 try:
                     page.wait_for_selector(
-                        ", ".join(self.CARD_SELECTORS + self.JOB_LINK_SELECTORS),
+                        ",".join(self.CARD_SELECTORS + self.JOB_LINK_SELECTORS),
                         timeout=self.POST_NAV_WAIT_MS,
                     )
-                except Exception:
-                    page.wait_for_timeout(self.POST_NAV_WAIT_MS)
+                except PlaywrightTimeoutError:
+                    pass
 
                 app_logger.debug(f"Actual URL: {page.url}")
-                elements = self._job_elements(page)
-                app_logger.debug(f"Initially rendered result elements: {len(elements)}")
+                results = self._extract_results(page)
+                app_logger.debug(
+                    f"Initially rendered result elements: {len(results)}"
+                )
 
-                best_info = page.evaluate("""
-                () => {
-                    const all = document.querySelectorAll('*');
-                    let best = null;
-                    let bestHeight = 0;
-                    for (const e of all) {
-                        const diff = e.scrollHeight - e.clientHeight;
-                        if (diff > bestHeight) {
-                            bestHeight = diff;
-                            best = e;
-                        }
-                    }
-                    if (!best) return null;
-                    window.__scrollTarget = best;
-                    return {
-                        tag: best.tagName,
-                        cls: String(best.className || ''),
-                        id: best.id,
-                        scrollHeight: best.scrollHeight,
-                        clientHeight: best.clientHeight,
-                        diff: bestHeight,
-                    };
-                }
-                """)
-                app_logger.debug(f"Largest scrollable element: {best_info}")
-
-                if best_info:
-                    previous = len(elements)
-                    stall_count = 0
-                    for i in range(self.MAX_SCROLLS_PER_PAGE):
-                        page.evaluate("""
+                # LinkedIn often lazy-loads more results while scrolling.
+                try:
+                    scroll_info = page.evaluate(
+                        """
                         () => {
-                            if (window.__scrollTarget) {
-                                window.__scrollTarget.scrollBy(0, 1200);
+                            const all = document.querySelectorAll('*');
+                            let best = null;
+                            let bestHeight = 0;
+                            for (const e of all) {
+                                const diff = e.scrollHeight - e.clientHeight;
+                                if (diff > bestHeight) {
+                                    bestHeight = diff;
+                                    best = e;
+                                }
                             }
+                            if (!best) return null;
+                            window.__scrollTarget = best;
+                            return {scrollHeight: best.scrollHeight, clientHeight: best.clientHeight, diff: bestHeight};
                         }
-                        """)
+                        """
+                    )
+                except Exception:
+                    scroll_info = None
 
-                        poll_interval_ms = 200
-                        elapsed_ms = 0
-                        current = previous
-                        while elapsed_ms < self.SCROLL_POLL_TIMEOUT_MS:
-                            page.wait_for_timeout(poll_interval_ms)
-                            elapsed_ms += poll_interval_ms
-                            current = len(self._job_elements(page))
-                            if current > previous:
-                                break
-
-                        app_logger.debug(
-                            f"Scroll {i + 1}: {current} (waited {elapsed_ms}ms)"
+                if scroll_info:
+                    previous = len(results)
+                    stalls = 0
+                    for scroll_num in range(self.MAX_SCROLLS_PER_PAGE):
+                        page.evaluate(
+                            """
+                            () => window.__scrollTarget?.scrollBy(0, 1200)
+                            """
                         )
-                        if current == previous:
-                            stall_count += 1
-                            if stall_count >= self.MAX_CONSECUTIVE_STALLS:
+                        page.wait_for_timeout(400)
+                        current_results = self._extract_results(page)
+                        current = len(current_results)
+                        app_logger.debug(
+                            f"Scroll {scroll_num + 1}: {current} results"
+                        )
+                        if current <= previous:
+                            stalls += 1
+                            if stalls >= self.MAX_CONSECUTIVE_STALLS:
                                 break
                         else:
-                            stall_count = 0
+                            stalls = 0
                         previous = current
-                        app_logger.debug(
-                            f"scroll cumulative time: {time.time() - page_start_time:.2f}s"
-                        )
+                        results = current_results
                         if len(jobs) + current >= self.JOB_LIMIT:
                             break
 
-                elements = self._job_elements(page)
-                app_logger.debug(f"Page {page_num + 1} final result elements: {len(elements)}")
+                results = self._extract_results(page)
+                app_logger.debug(
+                    f"Page {page_num + 1} final result elements: {len(results)}"
+                )
 
-                if not elements:
+                if not results:
                     if response is not None:
                         BlockDetector.check("linkedin", page, response)
                     if page_num == 0:
@@ -300,59 +313,26 @@ class LinkedInSearch(BaseProvider):
                     break
 
                 page_new_count = 0
-                for element in elements:
+                for result in results:
                     if len(jobs) >= self.JOB_LIMIT:
                         break
 
-                    try:
-                        text = (element.text_content() or "").lower()
-                    except Exception:
-                        text = ""
-
-                    try:
-                        link = element.locator("a[href*='/jobs/view/']").first.get_attribute("href") or ""
-                    except Exception:
-                        link = ""
-                    if not link:
-                        try:
-                            link = element.get_attribute("href") or ""
-                        except Exception:
-                            pass
-                    if link.startswith("/"):
-                        link = "https://www.linkedin.com" + link
-
-                    job_id = self._extract_job_id(link)
+                    job_id = result.get("job_id", "")
                     if not job_id or job_id in seen_job_ids:
                         continue
                     seen_job_ids.add(job_id)
 
-                    title = self._first_text(element, [
-                        "strong",
-                        "h3",
-                        ".base-search-card__title",
-                        ".job-card-list__title",
-                    ])
-                    company = self._first_text(element, [
-                        ".artdeco-entity-lockup__subtitle",
-                        ".base-search-card__subtitle",
-                        ".job-card-container__company-name",
-                    ])
-                    job_location = self._first_text(element, [
-                        ".artdeco-entity-lockup__caption",
-                        ".job-search-card__location",
-                        ".base-search-card__metadata",
-                    ])
-                    try:
-                        logo = element.locator("img").first.get_attribute("src") or ""
-                    except Exception:
-                        logo = ""
+                    text = (result.get("text") or "").lower()
+                    link = result.get("href") or ""
+                    if link.startswith("/"):
+                        link = "https://www.linkedin.com" + link
 
                     jobs.append({
                         "platform": "linkedin",
                         "job_id": job_id,
-                        "title": title,
-                        "company": company,
-                        "location": job_location,
+                        "title": result.get("title") or "",
+                        "company": result.get("company") or "",
+                        "location": result.get("location") or "",
                         "salary": "Not Disclosed",
                         "experience": request.experience,
                         "easy_apply": "easy apply" in text,
@@ -365,7 +345,7 @@ class LinkedInSearch(BaseProvider):
                         "job_url": link,
                         "apply_url": "",
                         "description": "",
-                        "company_logo": logo,
+                        "company_logo": result.get("logo") or "",
                         "posted_at": None,
                         "posted_within": request.posted_within,
                         "status": "NEW",
@@ -375,11 +355,16 @@ class LinkedInSearch(BaseProvider):
                 app_logger.debug(
                     f"Page {page_num + 1} added {page_new_count} new jobs. Total so far: {len(jobs)}"
                 )
+
                 if len(jobs) >= self.JOB_LIMIT:
-                    app_logger.info(f"Reached JOB_LIMIT ({self.JOB_LIMIT}). Stopping pagination.")
+                    app_logger.info(
+                        f"Reached JOB_LIMIT ({self.JOB_LIMIT}). Stopping pagination."
+                    )
                     break
                 if page_new_count == 0:
-                    app_logger.debug("No new jobs added from this page. Stopping pagination.")
+                    app_logger.debug(
+                        "No new jobs added from this page. Stopping pagination."
+                    )
                     break
 
             jobs = jobs[: self.JOB_LIMIT]
