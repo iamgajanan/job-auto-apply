@@ -1,11 +1,7 @@
 from fastapi import APIRouter, Depends, Request
 
-from app.db.session import get_db
 from app.features.jobs.dependencies import get_job_service
-from app.features.jobs.schema import (
-    JobSearchRequest,
-    JobSearchResponse,
-)
+from app.features.jobs.schema import JobSearchRequest, JobSearchResponse
 from app.features.jobs.service import JobService
 
 router = APIRouter(
@@ -16,9 +12,7 @@ router = APIRouter(
 
 @router.get("/health")
 def health():
-    return {
-        "message": "Jobs API Working",
-    }
+    return {"message": "Jobs API Working"}
 
 
 @router.post(
@@ -30,22 +24,6 @@ def search_jobs(
     http_request: Request,
     service: JobService = Depends(get_job_service),
 ):
-
     client_ip = http_request.client.host
-
-    jobs = service.search_jobs(
-        request,
-        client_ip,
-    )
-
-    return {
-        "jobs": jobs,
-    }
-
-
-@router.get("")
-def get_jobs(
-    service: JobService = Depends(get_job_service),
-):
-
-    return service.get_jobs()
+    jobs = service.search_jobs(request, client_ip)
+    return {"jobs": jobs}
