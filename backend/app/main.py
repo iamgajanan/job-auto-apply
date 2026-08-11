@@ -27,3 +27,4 @@ def root():
     return {
         "message": "Job Auto Apply Backend"
     }
+# CI/CD deployment test
