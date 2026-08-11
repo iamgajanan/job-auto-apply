@@ -43,6 +43,11 @@ jobs:
           echo "==> Verifying FastAPI import"
           "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
 
+          echo "==> Installing systemd service definition"
+          sudo -n install -m 0644 "$APP_DIR/deploy/job-auto-apply.service" /etc/systemd/system/job-auto-apply.service
+          sudo -n systemctl daemon-reload
+          sudo -n systemctl enable job-auto-apply.service
+
           echo "==> Restarting backend"
           sudo -n systemctl restart job-auto-apply.service
 
