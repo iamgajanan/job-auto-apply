@@ -11,13 +11,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  migrate-database:
+    name: Apply Supabase database migrations
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Initialize Supabase CLI configuration
+        run: supabase init
+
+      - name: Apply database migrations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$SUPABASE_DB_URL" || {
+            echo "ERROR: GitHub Actions secret SUPABASE_DB_URL is not configured"
+            exit 1
+          }
+          supabase --yes db push --db-url "$SUPABASE_DB_URL"
+
   deploy:
     name: Deploy FastAPI backend
+    needs: migrate-database
     runs-on: [self-hosted, linux, arm64]
 
     steps:
       - name: Deploy just-scrapping to Raspberry Pi
         shell: bash
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           set -Eeuo pipefail
 
@@ -28,6 +58,7 @@ jobs:
 
           test -d "$APP_DIR/.git" || { echo "ERROR: $APP_DIR is not a Git repository"; exit 1; }
           test -x "$VENV/python" || { echo "ERROR: backend virtualenv not found at $VENV"; exit 1; }
+          test -n "$SUPABASE_DB_URL" || { echo "ERROR: SUPABASE_DB_URL secret is not available"; exit 1; }
 
           cd "$APP_DIR"
 
@@ -42,6 +73,21 @@ jobs:
 
           echo "==> Verifying FastAPI import"
           "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
+
+          echo "==> Updating runtime database configuration"
+          cd "$APP_DIR"
+          SUPABASE_DB_URL="$SUPABASE_DB_URL" "$VENV/python" - <<'PY'
+          import os
+          from pathlib import Path
+
+          env_path = Path("/home/iamgajanan/Projects/job-auto-apply/.env")
+          database_url = os.environ["SUPABASE_DB_URL"]
+          lines = env_path.read_text().splitlines() if env_path.exists() else []
+          filtered = [line for line in lines if not line.startswith("DATABASE_URL=")]
+          filtered.append(f"DATABASE_URL={database_url}")
+          env_path.write_text("\n".join(filtered) + "\n")
+          env_path.chmod(0o600)
+          PY
 
           echo "==> Installing systemd service definition"
           sudo -n install -m 0644 "$APP_DIR/deploy/job-auto-apply.service" /etc/systemd/system/job-auto-apply.service
