@@ -49,18 +49,9 @@ class LinkedInSearch(BaseProvider):
             app_logger.warning(f"LinkedIn debug save failed: {e}")
 
     @staticmethod
-    def _extract_job_id(link: str) -> str:
-        if not link:
-            return ""
-        if "/jobs/view/" in link:
-            return link.split("/jobs/view/", 1)[1].split("/", 1)[0].split("?", 1)[0]
-        return ""
-
-    @staticmethod
     def _build_ai_query(request) -> str:
         """Build the natural-language query expected by LinkedIn's new Jobs UI."""
         parts = []
-
         title = (request.job_title or "").strip()
         location = (request.location or "").strip()
         experience = (request.experience or "").strip()
@@ -70,23 +61,18 @@ class LinkedInSearch(BaseProvider):
         if title:
             parts.append(title)
         parts.append("jobs")
-
         if location:
             parts.append(f"in {location}")
-
         if experience:
             parts.append(f"for {experience} experience")
-
         if work_mode not in {"", "any", "all"}:
-            normalized = {
+            parts.append({
                 "remote": "remote",
                 "hybrid": "hybrid",
                 "onsite": "on-site",
                 "on-site": "on-site",
                 "on site": "on-site",
-            }.get(work_mode, work_mode)
-            parts.append(normalized)
-
+            }.get(work_mode, work_mode))
         if posted:
             posted_phrase = {
                 "day": "posted in the past day",
@@ -95,10 +81,8 @@ class LinkedInSearch(BaseProvider):
             }.get(posted)
             if posted_phrase:
                 parts.append(posted_phrase)
-
         if request.easy_apply:
             parts.append("Easy Apply")
-
         return " ".join(parts).strip()
 
     def _extract_results(self, page):
@@ -171,21 +155,14 @@ class LinkedInSearch(BaseProvider):
                         });
                     }
                 }
-
                 return results;
             }
             """
         )
 
     def _open_ai_search(self, page, query: str):
-        """Open LinkedIn Jobs and submit the current natural-language search."""
+        """Submit a natural-language search through LinkedIn's current Jobs UI."""
         started = time.time()
-        page.goto(
-            "https://www.linkedin.com/jobs/",
-            wait_until="commit",
-            timeout=self.NAVIGATION_TIMEOUT_MS,
-        )
-
         try:
             page.wait_for_selector(
                 '[data-testid="typeahead-input"]',
@@ -204,8 +181,6 @@ class LinkedInSearch(BaseProvider):
         except PlaywrightTimeoutError:
             pass
 
-        # Give LinkedIn's client-side AI search enough time to replace the
-        # landing page with the actual results. Do not sleep a fixed 10-15s.
         try:
             page.wait_for_function(
                 """() => location.pathname.includes('/jobs/search-results') ||
@@ -223,7 +198,6 @@ class LinkedInSearch(BaseProvider):
 
     def search(self, request):
         browser = BrowserManager()
-
         if self.PROXY_URL:
             app_logger.info(
                 f"LinkedIn scraping via PROXY: {self.PROXY_URL.split('@')[-1]}"
@@ -245,7 +219,9 @@ class LinkedInSearch(BaseProvider):
                         timeout=self.NAVIGATION_TIMEOUT_MS,
                     )
                 except PlaywrightTimeoutError:
-                    app_logger.warning("LinkedIn Jobs landing navigation timed out; continuing")
+                    app_logger.warning(
+                        "LinkedIn Jobs landing navigation timed out; continuing"
+                    )
 
                 if response is not None:
                     BlockDetector.check("linkedin", page, response)
@@ -254,20 +230,13 @@ class LinkedInSearch(BaseProvider):
                     self._save_debug(page, "search-input-missing")
                     return []
 
-                # Detect challenge/blocking after the search interaction too.
-                BlockDetector.check("linkedin", page, response)
-
                 results = self._extract_results(page)
                 app_logger.debug(
                     f"LinkedIn initial job links: {len(results)} | url={page.url}"
                 )
 
-                # The new LinkedIn UI lazy-loads cards while scrolling. Scroll
-                # the page itself; this is more reliable than selecting the
-                # largest arbitrary DOM element.
                 previous_count = len(results)
                 stalls = 0
-
                 for scroll_num in range(self.MAX_SCROLLS):
                     if len(results) >= self.JOB_LIMIT:
                         break
@@ -276,7 +245,6 @@ class LinkedInSearch(BaseProvider):
                     page.wait_for_timeout(self.SCROLL_WAIT_MS)
                     current = self._extract_results(page)
                     current_count = len(current)
-
                     app_logger.debug(
                         f"LinkedIn scroll {scroll_num + 1}: {current_count} job links"
                     )
@@ -301,7 +269,6 @@ class LinkedInSearch(BaseProvider):
 
                 jobs = []
                 seen_job_ids = set()
-
                 for result in results:
                     if len(jobs) >= self.JOB_LIMIT:
                         break
