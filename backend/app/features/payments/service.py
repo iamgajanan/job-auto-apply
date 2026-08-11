@@ -138,7 +138,7 @@ class PaymentService:
         user_id: str,
         order_id: str,
         payment_id: str,
-        signature: str,
+        signature: str | None = None,
         *,
         require_captured: bool = True,
     ) -> dict[str, Any]:
@@ -187,7 +187,12 @@ class PaymentService:
                     "remaining_searches": remaining,
                 }
 
-            if not self.verify_signature(order_id, payment_id, signature, settings.RAZORPAY_KEY_SECRET):
+            if signature is not None and not self.verify_signature(
+                order_id,
+                payment_id,
+                signature,
+                settings.RAZORPAY_KEY_SECRET,
+            ):
                 raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
 
             razorpay_payment = self._fetch_payment(payment_id)
@@ -216,7 +221,7 @@ class PaymentService:
                     """
                     update public.payments
                     set provider_payment_id = :payment_id,
-                        provider_signature = :signature,
+                        provider_signature = coalesce(:signature, provider_signature),
                         status = 'captured',
                         paid_at = timezone('utc', now()),
                         updated_at = timezone('utc', now())
