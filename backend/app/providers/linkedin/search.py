@@ -2,6 +2,8 @@ from urllib.parse import quote
 from pathlib import Path
 import time
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from app.providers.linkedin.browser import BrowserManager
 from app.gateway.block_detector import BlockDetector
 from app.core.logger import app_logger
@@ -27,12 +29,12 @@ class LinkedInSearch(BaseProvider):
     SCROLL_POLL_TIMEOUT_MS = 800
     MAX_CONSECUTIVE_STALLS = 2
     POST_NAV_WAIT_MS = 1200
+    NAVIGATION_TIMEOUT_MS = 15000
+    DOM_CONTENT_TIMEOUT_MS = 10000
 
     PROXY_URL = settings.SCRAPER_PROXY_URL or None
     DEBUG_DIR = Path(__file__).resolve().parents[3] / "debug"
 
-    # LinkedIn has changed its search-results DOM several times. Prefer the
-    # stable job-link signal and use card containers only as a fallback.
     JOB_LINK_SELECTORS = (
         "a[href*='/jobs/view/']",
         "a[href*='/jobs/collections/']",
@@ -59,7 +61,6 @@ class LinkedInSearch(BaseProvider):
 
     def _job_elements(self, page):
         """Return unique result elements using several LinkedIn DOM variants."""
-        # The job URL is more stable than LinkedIn's presentation classes.
         links = page.locator(", ".join(self.JOB_LINK_SELECTORS))
         if links.count():
             elements = []
@@ -72,9 +73,6 @@ class LinkedInSearch(BaseProvider):
                     if not job_id or job_id in seen:
                         continue
                     seen.add(job_id)
-                    # Walk up to the nearest result/card element. If no known
-                    # card exists, use the link itself; field extraction has
-                    # additional fallbacks below.
                     card = link.locator(
                         "xpath=ancestor::*[self::li or contains(@class,'job-card') or contains(@class,'base-card')][1]"
                     )
@@ -179,12 +177,41 @@ class LinkedInSearch(BaseProvider):
                     f"LinkedIn page {page_num + 1} | start={start_offset} | {url}"
                 )
 
-                response = page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                BlockDetector.check("linkedin", page, response)
-                app_logger.debug(f"goto took {time.time() - page_start_time:.2f}s")
+                # Do not make the whole request depend on DOMContentLoaded.
+                # LinkedIn can keep loading secondary resources for a long time,
+                # especially through a proxy. `commit` gives us the response as
+                # soon as navigation commits, after which we wait briefly for
+                # the actual result DOM.
+                try:
+                    response = page.goto(
+                        url,
+                        wait_until="commit",
+                        timeout=self.NAVIGATION_TIMEOUT_MS,
+                    )
+                except PlaywrightTimeoutError:
+                    app_logger.warning(
+                        f"LinkedIn navigation exceeded {self.NAVIGATION_TIMEOUT_MS}ms; "
+                        "continuing with the current page instead of failing the API request"
+                    )
+                    response = None
 
-                # Wait for either a known card or a job URL. This handles both
-                # the classic and newer jobs-search-results DOM.
+                # DOMContentLoaded is useful but is not required for the scraper.
+                # Never turn a slow secondary resource into a 500 response.
+                try:
+                    page.wait_for_load_state(
+                        "domcontentloaded",
+                        timeout=self.DOM_CONTENT_TIMEOUT_MS,
+                    )
+                except PlaywrightTimeoutError:
+                    app_logger.debug(
+                        "LinkedIn DOMContentLoaded timed out; continuing with available DOM"
+                    )
+
+                if response is not None:
+                    BlockDetector.check("linkedin", page, response)
+
+                app_logger.debug(f"goto/load took {time.time() - page_start_time:.2f}s")
+
                 try:
                     page.wait_for_selector(
                         ", ".join(self.CARD_SELECTORS + self.JOB_LINK_SELECTORS),
@@ -265,7 +292,8 @@ class LinkedInSearch(BaseProvider):
                 app_logger.debug(f"Page {page_num + 1} final result elements: {len(elements)}")
 
                 if not elements:
-                    BlockDetector.check("linkedin", page, response)
+                    if response is not None:
+                        BlockDetector.check("linkedin", page, response)
                     if page_num == 0:
                         self._save_debug(page, "zero-results")
                     app_logger.debug("No job result elements found. Stopping pagination.")
@@ -285,7 +313,7 @@ class LinkedInSearch(BaseProvider):
                         link = element.locator("a[href*='/jobs/view/']").first.get_attribute("href") or ""
                     except Exception:
                         link = ""
-                    if not link and getattr(element, "get_attribute", None):
+                    if not link:
                         try:
                             link = element.get_attribute("href") or ""
                         except Exception:
@@ -319,21 +347,6 @@ class LinkedInSearch(BaseProvider):
                     except Exception:
                         logo = ""
 
-                    if not title:
-                        title = ""
-                    if not company:
-                        company = ""
-                    if not job_location:
-                        job_location = ""
-
-                    work_mode = "Unknown"
-                    if "remote" in text:
-                        work_mode = "Remote"
-                    elif "hybrid" in text:
-                        work_mode = "Hybrid"
-                    elif "on-site" in text or "onsite" in text:
-                        work_mode = "On-site"
-
                     jobs.append({
                         "platform": "linkedin",
                         "job_id": job_id,
@@ -343,7 +356,12 @@ class LinkedInSearch(BaseProvider):
                         "salary": "Not Disclosed",
                         "experience": request.experience,
                         "easy_apply": "easy apply" in text,
-                        "work_mode": work_mode,
+                        "work_mode": (
+                            "Remote" if "remote" in text else
+                            "Hybrid" if "hybrid" in text else
+                            "On-site" if "on-site" in text or "onsite" in text else
+                            "Unknown"
+                        ),
                         "job_url": link,
                         "apply_url": "",
                         "description": "",
