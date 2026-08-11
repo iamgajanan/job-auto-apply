@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 
 from app.auth.dependencies import require_super_admin
@@ -24,6 +24,10 @@ class UpdatePlanRequest(BaseModel):
     price_inr_paise: int = Field(ge=0)
     search_limit: int = Field(gt=0)
     is_active: bool = True
+
+
+class AllowlistEmailRequest(BaseModel):
+    email: EmailStr
 
 
 @router.get("/users")
@@ -69,12 +73,19 @@ def grant_quota(
     _: CurrentUser = Depends(require_super_admin),
 ):
     with get_engine().begin() as connection:
-        exists = connection.execute(
+        user_exists = connection.execute(
             text("select exists(select 1 from public.profiles where id = :id)"),
             {"id": str(user_id)},
         ).scalar_one()
-        if not exists:
+        if not user_exists:
             raise HTTPException(status_code=404, detail="User not found")
+
+        plan_exists = connection.execute(
+            text("select exists(select 1 from public.plans where code = :code)"),
+            {"code": request.plan_code},
+        ).scalar_one()
+        if not plan_exists:
+            raise HTTPException(status_code=404, detail="Plan not found")
 
         connection.execute(
             text(
@@ -143,3 +154,48 @@ def update_plan(
         if result.rowcount != 1:
             raise HTTPException(status_code=404, detail="Plan not found")
     return {"status": "updated", "plan_code": plan_code}
+
+
+@router.get("/allowlist")
+def list_allowlist(_: CurrentUser = Depends(require_super_admin)):
+    with get_engine().connect() as connection:
+        rows = connection.execute(
+            text("select email, is_active, created_at from public.admin_allowlist order by email")
+        ).mappings().all()
+    return {"emails": [dict(row) for row in rows]}
+
+
+@router.post("/allowlist")
+def add_allowlist_email(
+    request: AllowlistEmailRequest,
+    _: CurrentUser = Depends(require_super_admin),
+):
+    email = request.email.lower()
+    with get_engine().begin() as connection:
+        connection.execute(
+            text(
+                """
+                insert into public.admin_allowlist (email, is_active)
+                values (:email, true)
+                on conflict (email) do update set is_active = true
+                """
+            ),
+            {"email": email},
+        )
+    return {"status": "active", "email": email}
+
+
+@router.delete("/allowlist/{email}")
+def remove_allowlist_email(
+    email: str,
+    _: CurrentUser = Depends(require_super_admin),
+):
+    normalized = email.lower()
+    with get_engine().begin() as connection:
+        result = connection.execute(
+            text("update public.admin_allowlist set is_active = false where email = :email"),
+            {"email": normalized},
+        )
+        if result.rowcount != 1:
+            raise HTTPException(status_code=404, detail="Email not found in admin allowlist")
+    return {"status": "inactive", "email": normalized}
