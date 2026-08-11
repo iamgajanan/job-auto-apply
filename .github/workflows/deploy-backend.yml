@@ -133,12 +133,226 @@ jobs:
             if curl -fsS --max-time 3 http://127.0.0.1:8004/ >/tmp/job-auto-apply-health.json; then
               echo "Backend health check passed"
               cat /tmp/job-auto-apply-health.json
-              exit 0
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: Backend did not become healthy on port 8004"
+              sudo -n systemctl --no-pager --full status job-auto-apply.service || true
+              sudo -n journalctl -u job-auto-apply.service -n 80 --no-pager || true
+              exit 1
             fi
             sleep 2
           done
 
-          echo "ERROR: Backend did not become healthy on port 8004"
-          sudo -n systemctl --no-pager --full status job-auto-apply.service || true
-          sudo -n journalctl -u job-auto-apply.service -n 80 --no-pager || true
-          exit 1
+          echo "==> Running post-deploy API smoke tests"
+          BASE_URL="http://127.0.0.1:8004"
+          TEST_EMAIL="ci-auth-$(date +%s)-$RANDOM@yopmail.com"
+          TEST_PASSWORD="TestPassword123!"
+          NEW_PASSWORD="NewTestPassword123!"
+          TMP_DIR="$(mktemp -d)"
+
+          cleanup() {
+            "$VENV/python" - <<'PY' || true
+          import os
+          import psycopg
+
+          email = os.environ.get("SMOKE_TEST_EMAIL")
+          if not email:
+              raise SystemExit
+          with psycopg.connect(os.environ["SMOKE_TEST_DB_URL"]) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute("delete from auth.users where lower(email) = lower(%s)", (email,))
+                  cursor.execute("delete from public.admin_allowlist where lower(email) = lower(%s)", (email,))
+              connection.commit()
+          PY
+            rm -rf "$TMP_DIR"
+          }
+          export SMOKE_TEST_EMAIL="$TEST_EMAIL"
+          export SMOKE_TEST_DB_URL="$SUPABASE_DB_URL"
+          trap cleanup EXIT
+
+          assert_status() {
+            expected="$1"
+            actual="$2"
+            body_file="$3"
+            if [ "$actual" != "$expected" ]; then
+              echo "ERROR: expected HTTP $expected, got $actual"
+              cat "$body_file" || true
+              exit 1
+            fi
+          }
+
+          echo "[1/12] Database health"
+          status=$(curl -sS -o "$TMP_DIR/database.json" -w '%{http_code}' "$BASE_URL/api/v1/health/database")
+          assert_status 200 "$status" "$TMP_DIR/database.json"
+
+          echo "[2/12] Plans"
+          status=$(curl -sS -o "$TMP_DIR/plans.json" -w '%{http_code}' "$BASE_URL/api/v1/plans")
+          assert_status 200 "$status" "$TMP_DIR/plans.json"
+          "$VENV/python" - "$TMP_DIR/plans.json" <<'PY'
+          import json, sys
+          data=json.load(open(sys.argv[1]))
+          assert len(data["plans"]) == 5, data
+          assert data["plans"][0]["code"] == "free", data
+          print("plans: PASS")
+          PY
+
+          echo "[3/12] Signup"
+          status=$(curl -sS -o "$TMP_DIR/signup.json" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/signup" \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$TEST_EMAIL\",\"password\":\"$TEST_PASSWORD\",\"full_name\":\"CI Auth Test\"}")
+          assert_status 201 "$status" "$TMP_DIR/signup.json"
+          USER_ID=$("$VENV/python" - "$TMP_DIR/signup.json" <<'PY'
+          import json,sys
+          data=json.load(open(sys.argv[1]))
+          print(data["user"]["id"])
+          PY
+          )
+
+          echo "[4/12] Profile and free quota bootstrap"
+          "$VENV/python" - <<'PY'
+          import os
+          import psycopg
+
+          with psycopg.connect(os.environ["SMOKE_TEST_DB_URL"]) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute(
+                      """
+                      select p.role, p.status, p.plan_code,
+                             coalesce(sum(qa.granted_searches), 0),
+                             coalesce(sum(qa.used_searches), 0)
+                      from public.profiles p
+                      left join public.quota_allocations qa on qa.user_id = p.id
+                      where p.id = %s
+                      group by p.id
+                      """,
+                      (os.environ["SMOKE_TEST_USER_ID"],),
+                  )
+                  row = cursor.fetchone()
+                  assert row == ("user", "active", "free", 50, 0), row
+                  cursor.execute(
+                      "update auth.users set email_confirmed_at = coalesce(email_confirmed_at, timezone('utc', now())) where id = %s",
+                      (os.environ["SMOKE_TEST_USER_ID"],),
+                  )
+              connection.commit()
+          print("profile/quota: PASS")
+          PY
+
+          export SMOKE_TEST_USER_ID="$USER_ID"
+          "$VENV/python" - <<'PY'
+          import os
+          import psycopg
+          with psycopg.connect(os.environ["SMOKE_TEST_DB_URL"]) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute("update auth.users set email_confirmed_at = coalesce(email_confirmed_at, timezone('utc', now())) where id = %s", (os.environ["SMOKE_TEST_USER_ID"],))
+              connection.commit()
+          PY
+
+          echo "[5/12] Missing/invalid authentication"
+          status=$(curl -sS -o "$TMP_DIR/no-token.json" -w '%{http_code}' "$BASE_URL/api/v1/auth/me")
+          assert_status 401 "$status" "$TMP_DIR/no-token.json"
+          status=$(curl -sS -o "$TMP_DIR/fake-token.json" -w '%{http_code}' \
+            -H 'Authorization: Bearer invalid-token' "$BASE_URL/api/v1/auth/me")
+          assert_status 401 "$status" "$TMP_DIR/fake-token.json"
+
+          echo "[6/12] Login and current user"
+          status=$(curl -sS -o "$TMP_DIR/login.json" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/login" \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$TEST_EMAIL\",\"password\":\"$TEST_PASSWORD\"}")
+          assert_status 200 "$status" "$TMP_DIR/login.json"
+          ACCESS_TOKEN=$("$VENV/python" - "$TMP_DIR/login.json" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))["session"]["access_token"])
+          PY
+          )
+          REFRESH_TOKEN=$("$VENV/python" - "$TMP_DIR/login.json" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))["session"]["refresh_token"])
+          PY
+          )
+          status=$(curl -sS -o "$TMP_DIR/me.json" -w '%{http_code}' -H "Authorization: Bearer $ACCESS_TOKEN" "$BASE_URL/api/v1/auth/me")
+          assert_status 200 "$status" "$TMP_DIR/me.json"
+
+          echo "[7/12] Account and normal-user admin denial"
+          status=$(curl -sS -o "$TMP_DIR/account.json" -w '%{http_code}' -H "Authorization: Bearer $ACCESS_TOKEN" "$BASE_URL/api/v1/account/me")
+          assert_status 200 "$status" "$TMP_DIR/account.json"
+          "$VENV/python" - "$TMP_DIR/account.json" <<'PY'
+          import json,sys
+          data=json.load(open(sys.argv[1]))
+          assert data["usage"]["plan_code"] == "free", data
+          assert data["usage"]["remaining_searches"] == 50, data
+          print("account/quota: PASS")
+          PY
+          status=$(curl -sS -o "$TMP_DIR/admin-user.json" -w '%{http_code}' -H "Authorization: Bearer $ACCESS_TOKEN" "$BASE_URL/api/v1/admin/users")
+          assert_status 403 "$status" "$TMP_DIR/admin-user.json"
+
+          echo "[8/12] Refresh token"
+          status=$(curl -sS -o "$TMP_DIR/refresh.json" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/refresh" \
+            -H 'Content-Type: application/json' \
+            --data "{\"refresh_token\":\"$REFRESH_TOKEN\"}")
+          assert_status 200 "$status" "$TMP_DIR/refresh.json"
+
+          echo "[9/12] Password update and re-login"
+          status=$(curl -sS -o "$TMP_DIR/password.json" -w '%{http_code}' \
+            -X PUT "$BASE_URL/api/v1/auth/password" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "{\"password\":\"$NEW_PASSWORD\"}")
+          assert_status 204 "$status" "$TMP_DIR/password.json"
+          status=$(curl -sS -o "$TMP_DIR/new-login.json" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/login" \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$TEST_EMAIL\",\"password\":\"$NEW_PASSWORD\"}")
+          assert_status 200 "$status" "$TMP_DIR/new-login.json"
+          ACCESS_TOKEN=$("$VENV/python" - "$TMP_DIR/new-login.json" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))["session"]["access_token"])
+          PY
+          )
+          REFRESH_TOKEN=$("$VENV/python" - "$TMP_DIR/new-login.json" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))["session"]["refresh_token"])
+          PY
+          )
+
+          echo "[10/12] Admin allowlist promotion"
+          "$VENV/python" - <<'PY'
+          import os
+          import psycopg
+          with psycopg.connect(os.environ["SMOKE_TEST_DB_URL"]) as connection:
+              with connection.cursor() as cursor:
+                  cursor.execute("insert into public.admin_allowlist(email, is_active) values (%s, true) on conflict (email) do update set is_active=true", (os.environ["SMOKE_TEST_EMAIL"],))
+              connection.commit()
+          PY
+          status=$(curl -sS -o "$TMP_DIR/admin.json" -w '%{http_code}' -H "Authorization: Bearer $ACCESS_TOKEN" "$BASE_URL/api/v1/admin/users")
+          assert_status 200 "$status" "$TMP_DIR/admin.json"
+
+          echo "[11/12] Logout and refresh-token revocation"
+          status=$(curl -sS -o "$TMP_DIR/logout.json" -w '%{http_code}' -X POST -H "Authorization: Bearer $ACCESS_TOKEN" "$BASE_URL/api/v1/auth/logout")
+          assert_status 204 "$status" "$TMP_DIR/logout.json"
+          status=$(curl -sS -o "$TMP_DIR/revoked-refresh.json" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/refresh" \
+            -H 'Content-Type: application/json' \
+            --data "{\"refresh_token\":\"$REFRESH_TOKEN\"}")
+          if [ "$status" -lt 400 ]; then
+            echo "ERROR: refresh token remained valid after logout"
+            cat "$TMP_DIR/revoked-refresh.json"
+            exit 1
+          fi
+
+          echo "[12/12] Generic password-reset and protected job endpoint"
+          status=$(curl -sS -o "$TMP_DIR/reset.json" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/password-reset" \
+            -H 'Content-Type: application/json' \
+            --data '{"email":"definitely-not-a-real-user@example.invalid"}')
+          assert_status 202 "$status" "$TMP_DIR/reset.json"
+          status=$(curl -sS -o "$TMP_DIR/jobs-no-token.json" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/jobs/search" \
+            -H 'Content-Type: application/json' \
+            --data '{"platform":"naukri","job_title":"react","location":"pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}')
+          assert_status 401 "$status" "$TMP_DIR/jobs-no-token.json"
+
+          echo "POST-DEPLOY AUTH SMOKE TESTS: PASS"
