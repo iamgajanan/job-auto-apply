@@ -23,7 +23,7 @@ class AuthContext:
 
 
 def _http_error(exc: SupabaseAuthError) -> HTTPException:
-    if exc.status_code == 401:
+    if exc.status_code in (401, 403):
         return HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired access token",
@@ -34,9 +34,8 @@ def _http_error(exc: SupabaseAuthError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=str(exc))
 
 
-def _load_profile(user_id: UUID, email: str | None, full_name: str | None) -> UserProfile:
-    engine = get_engine()
-    with engine.begin() as connection:
+def load_profile(user_id: UUID, email: str | None, full_name: str | None) -> UserProfile:
+    with get_engine().begin() as connection:
         connection.execute(
             text(
                 """
@@ -107,7 +106,9 @@ def get_current_user(
     except SupabaseAuthError as exc:
         raise _http_error(exc) from exc
 
-    raw_user = auth_user.get("user") if isinstance(auth_user, dict) else None
+    # /auth/v1/user returns the user object directly. Supporting a nested user
+    # object as well keeps this adapter tolerant of SDK-style response shapes.
+    raw_user = auth_user.get("user") if isinstance(auth_user.get("user"), dict) else auth_user
     if not raw_user:
         raise HTTPException(status_code=401, detail="Invalid authentication response")
 
@@ -116,7 +117,7 @@ def get_current_user(
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="Invalid authentication subject") from exc
 
-    profile = _load_profile(
+    profile = load_profile(
         user_id,
         raw_user.get("email"),
         (raw_user.get("user_metadata") or {}).get("full_name"),
