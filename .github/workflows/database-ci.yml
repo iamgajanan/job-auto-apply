@@ -26,9 +26,6 @@ jobs:
         with:
           version: latest
 
-      - name: Initialize Supabase CLI configuration
-        run: supabase init
-
       - name: Start local Postgres
         run: supabase db start
 
