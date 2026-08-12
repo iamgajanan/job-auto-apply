@@ -102,14 +102,13 @@ jobs:
           env_path.chmod(0o600)
           PY
 
-          echo "==> Installing systemd service definition"
+          echo "==> Installing and restarting backend service"
           sudo -n install -m 0644 "$APP_DIR/deploy/job-auto-apply.service" /etc/systemd/system/job-auto-apply.service
           sudo -n systemctl daemon-reload
           sudo -n systemctl enable job-auto-apply.service
-          echo "==> Restarting backend"
           sudo -n systemctl restart job-auto-apply.service
 
-          echo "==> Waiting for port 8004"
+          echo "==> Waiting for backend on port 8004"
           for i in {1..30}; do
             if curl -fsS --max-time 3 http://127.0.0.1:8004/ >/tmp/job-auto-apply-health.json; then
               echo "Backend health check passed"
@@ -125,34 +124,49 @@ jobs:
             sleep 2
           done
 
-          echo "==> Cloudflare/origin diagnostics"
-          echo "--- listening sockets ---"
-          ss -ltnp | grep -E ':(8004|80|443)\b' || true
-          echo "--- cloudflared processes ---"
-          pgrep -af cloudflared || true
-          echo "--- cloudflared systemd units ---"
-          systemctl list-units --type=service --all --no-legend | grep -i cloudflared || true
-          echo "--- cloudflared service status ---"
-          sudo -n systemctl --no-pager --full status cloudflared 2>&1 || true
-          echo "--- cloudflared recent logs ---"
-          sudo -n journalctl -u cloudflared -n 80 --no-pager 2>&1 || true
-          echo "--- cloudflared config candidates ---"
-          for cfg in /etc/cloudflared/config.yml /etc/cloudflared/config.yaml /home/iamgajanan/.cloudflared/config.yml /home/iamgajanan/.cloudflared/config.yaml; do
-            if [ -f "$cfg" ]; then
-              echo "### $cfg"
-              sudo -n sed -E 's/(tunnel:[[:space:]]*).*/\1<redacted>/; s/(credentials-file:[[:space:]]*).*/\1<redacted>/' "$cfg" || true
+          echo "==> Restarting active Cloudflare tunnel"
+          if systemctl list-unit-files | grep -q '^cloudflared-n8n.service'; then
+            sudo -n systemctl restart cloudflared-n8n.service
+            sleep 3
+            sudo -n systemctl is-active --quiet cloudflared-n8n.service || {
+              echo "ERROR: cloudflared-n8n.service is not active"
+              sudo -n systemctl --no-pager --full status cloudflared-n8n.service || true
+              sudo -n journalctl -u cloudflared-n8n.service -n 80 --no-pager || true
+              exit 1
+            }
+            echo "Cloudflare tunnel service: ACTIVE"
+            pgrep -af 'cloudflared.*config.*\.cloudflared/config\.yml' || true
+            sudo -n journalctl -u cloudflared-n8n.service -n 30 --no-pager || true
+          else
+            echo "ERROR: cloudflared-n8n.service not installed on Raspberry Pi"
+            exit 1
+          fi
+
+          echo "==> Verifying Cloudflare origin routing"
+          for i in {1..5}; do
+            status=$(curl -sS -o /tmp/jobs-public.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/ || true)
+            echo "public / attempt $i: HTTP $status"
+            if [ "$status" = "200" ]; then
+              cat /tmp/jobs-public.json
+            else
+              cat /tmp/jobs-public.json 2>/dev/null || true
             fi
+            [ "$status" = "200" ] || sleep 2
+done
           done
-          echo "--- local origin curl ---"
-          curl -sv --http1.1 --max-time 10 http://127.0.0.1:8004/ 2>&1 || true
-          echo "--- public hostname curl from Pi ---"
-          curl -sv --http1.1 --max-time 20 https://jobs.n8npi.live/ 2>&1 || true
-          echo "--- public health curl from Pi ---"
-          curl -sv --http1.1 --max-time 20 https://jobs.n8npi.live/api/v1/health/database 2>&1 || true
+
+          status=$(curl -sS -o /tmp/jobs-health-public.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/api/v1/health/database || true)
+          echo "public /api/v1/health/database: HTTP $status"
+          cat /tmp/jobs-health-public.json 2>/dev/null || true
+          if [ "$status" != "200" ]; then
+            echo "ERROR: public jobs hostname is not healthy through Cloudflare"
+            sudo -n journalctl -u cloudflared-n8n.service -n 100 --no-pager || true
+            exit 1
+          fi
 
           echo "==> Post-deploy API smoke checks"
           TMP_DIR="$(mktemp -d)"
-          TEST_EMAIL="ci-auth-$(date +%s)-$RANDOM@example.com"
+          TEST_EMAIL="ci-auth-$(date +%s)-$RANDOM@gmail.com"
           export SMOKE_TEST_EMAIL="$TEST_EMAIL"
           export SMOKE_TEST_DB_URL="$SUPABASE_DB_URL"
           trap 'rm -rf "$TMP_DIR"' EXIT
