@@ -6,6 +6,7 @@ import json
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from app.auth.dependencies import get_current_user
 from app.auth.schemas import CurrentUser
@@ -68,7 +69,6 @@ async def razorpay_webhook(
         raise HTTPException(status_code=400, detail="Invalid webhook payload") from exc
 
     event_type = payload.get("event", "")
-    # Razorpay uses the event id field inside the payload for deduplication.
     provider_event_id = payload.get("id") or payload.get("event_id") or ""
 
     if event_type not in ("payment.captured", "payment.failed"):
@@ -80,7 +80,6 @@ async def razorpay_webhook(
     if not order_id or not payment_id:
         raise HTTPException(status_code=400, detail="Webhook is missing payment identifiers")
 
-    # Resolve the internal payment record and owner.
     with get_engine().connect() as connection:
         row = connection.execute(
             text(
@@ -94,11 +93,10 @@ async def razorpay_webhook(
         ).mappings().one_or_none()
 
     if not row:
-        # Unknown order — acknowledge so Razorpay stops retrying.
         return {"received": True, "processed": False, "reason": "unknown_order"}
 
-    # Deduplicate: attempt to record this event. If the unique constraint fires,
-    # this exact event has already been processed — return 200 so Razorpay stops retrying.
+    event_id = provider_event_id or f"razorpay_{event_type}_{payment_id}"
+
     try:
         with get_engine().begin() as connection:
             connection.execute(
@@ -116,41 +114,53 @@ async def razorpay_webhook(
                     """
                 ),
                 {
-                    "event_id": provider_event_id or f"razorpay_{event_type}_{payment_id}",
+                    "event_id": event_id,
                     "event_type": event_type,
                     "payment_id": str(row["id"]),
                     "raw": json.dumps(payload),
                 },
             )
-    except Exception as exc:
-        # Unique constraint violation means duplicate delivery — safe to ack.
-        if "webhook_events_provider_event_unique" in str(exc) or "unique" in str(exc).lower():
+    except IntegrityError as exc:
+        if "webhook_events_provider_event_unique" in str(exc.orig):
             return {"received": True, "processed": False, "reason": "duplicate_event"}
         raise
 
-    # Handle payment.failed — mark the payment record as failed.
-    if event_type == "payment.failed":
+    try:
+        if event_type == "payment.failed":
+            with get_engine().begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        update public.payments
+                        set status = 'failed',
+                            provider_payment_id = :payment_id,
+                            updated_at = timezone('utc', now())
+                        where id = :id
+                          and status not in ('captured', 'refunded')
+                        """
+                    ),
+                    {"payment_id": payment_id, "id": str(row["id"])},
+                )
+            return {"received": True, "processed": True, "event": "payment.failed"}
+
+        result = payment_service.finalize_payment(
+            str(row["user_id"]),
+            order_id,
+            payment_id,
+            None,
+        )
+        return {"received": True, "processed": True, "event": "payment.captured", "result": result}
+    except Exception:
+        # The event is only a deduplication marker. If processing failed, remove
+        # the marker so Razorpay's retry can process the event again.
         with get_engine().begin() as connection:
             connection.execute(
                 text(
                     """
-                    update public.payments
-                    set status = 'failed',
-                        provider_payment_id = :payment_id,
-                        updated_at = timezone('utc', now())
-                    where id = :id
-                      and status not in ('captured', 'refunded')
+                    delete from public.webhook_events
+                    where provider = 'razorpay' and provider_event_id = :event_id
                     """
                 ),
-                {"payment_id": payment_id, "id": str(row["id"])},
+                {"event_id": event_id},
             )
-        return {"received": True, "processed": True, "event": "payment.failed"}
-
-    # Handle payment.captured — finalize quota grant.
-    result = payment_service.finalize_payment(
-        str(row["user_id"]),
-        order_id,
-        payment_id,
-        None,
-    )
-    return {"received": True, "processed": True, "event": "payment.captured", "result": result}
+        raise
