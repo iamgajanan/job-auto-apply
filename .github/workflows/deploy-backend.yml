@@ -125,6 +125,31 @@ jobs:
             sleep 2
           done
 
+          echo "==> Cloudflare/origin diagnostics"
+          echo "--- listening sockets ---"
+          ss -ltnp | grep -E ':(8004|80|443)\b' || true
+          echo "--- cloudflared processes ---"
+          pgrep -af cloudflared || true
+          echo "--- cloudflared systemd units ---"
+          systemctl list-units --type=service --all --no-legend | grep -i cloudflared || true
+          echo "--- cloudflared service status ---"
+          sudo -n systemctl --no-pager --full status cloudflared 2>&1 || true
+          echo "--- cloudflared recent logs ---"
+          sudo -n journalctl -u cloudflared -n 80 --no-pager 2>&1 || true
+          echo "--- cloudflared config candidates ---"
+          for cfg in /etc/cloudflared/config.yml /etc/cloudflared/config.yaml /home/iamgajanan/.cloudflared/config.yml /home/iamgajanan/.cloudflared/config.yaml; do
+            if [ -f "$cfg" ]; then
+              echo "### $cfg"
+              sudo -n sed -E 's/(tunnel:[[:space:]]*).*/\1<redacted>/; s/(credentials-file:[[:space:]]*).*/\1<redacted>/' "$cfg" || true
+            fi
+          done
+          echo "--- local origin curl ---"
+          curl -sv --http1.1 --max-time 10 http://127.0.0.1:8004/ 2>&1 || true
+          echo "--- public hostname curl from Pi ---"
+          curl -sv --http1.1 --max-time 20 https://jobs.n8npi.live/ 2>&1 || true
+          echo "--- public health curl from Pi ---"
+          curl -sv --http1.1 --max-time 20 https://jobs.n8npi.live/api/v1/health/database 2>&1 || true
+
           echo "==> Post-deploy API smoke checks"
           TMP_DIR="$(mktemp -d)"
           TEST_EMAIL="ci-auth-$(date +%s)-$RANDOM@example.com"
