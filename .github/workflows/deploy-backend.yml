@@ -152,7 +152,6 @@ jobs:
               cat /tmp/jobs-public.json 2>/dev/null || true
             fi
             [ "$status" = "200" ] || sleep 2
-done
           done
 
           status=$(curl -sS -o /tmp/jobs-health-public.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/api/v1/health/database || true)
