@@ -67,8 +67,12 @@ async def razorpay_webhook(
     except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook payload") from exc
 
-    if payload.get("event") != "payment.captured":
-        return {"received": True, "processed": False}
+    event_type = payload.get("event", "")
+    # Razorpay uses the event id field inside the payload for deduplication.
+    provider_event_id = payload.get("id") or payload.get("event_id") or ""
+
+    if event_type not in ("payment.captured", "payment.failed"):
+        return {"received": True, "processed": False, "reason": "unhandled_event"}
 
     entity = ((payload.get("payload") or {}).get("payment") or {}).get("entity") or {}
     order_id = entity.get("order_id")
@@ -76,11 +80,12 @@ async def razorpay_webhook(
     if not order_id or not payment_id:
         raise HTTPException(status_code=400, detail="Webhook is missing payment identifiers")
 
+    # Resolve the internal payment record and owner.
     with get_engine().connect() as connection:
         row = connection.execute(
             text(
                 """
-                select user_id
+                select id, user_id, status
                 from public.payments
                 where provider = 'razorpay' and provider_order_id = :order_id
                 """
@@ -89,12 +94,63 @@ async def razorpay_webhook(
         ).mappings().one_or_none()
 
     if not row:
-        return {"received": True, "processed": False}
+        # Unknown order — acknowledge so Razorpay stops retrying.
+        return {"received": True, "processed": False, "reason": "unknown_order"}
 
+    # Deduplicate: attempt to record this event. If the unique constraint fires,
+    # this exact event has already been processed — return 200 so Razorpay stops retrying.
+    try:
+        with get_engine().begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    insert into public.webhook_events (
+                        provider, provider_event_id, event_type, payment_id, raw_payload
+                    ) values (
+                        'razorpay',
+                        :event_id,
+                        :event_type,
+                        :payment_id,
+                        cast(:raw as jsonb)
+                    )
+                    """
+                ),
+                {
+                    "event_id": provider_event_id or f"razorpay_{event_type}_{payment_id}",
+                    "event_type": event_type,
+                    "payment_id": str(row["id"]),
+                    "raw": json.dumps(payload),
+                },
+            )
+    except Exception as exc:
+        # Unique constraint violation means duplicate delivery — safe to ack.
+        if "webhook_events_provider_event_unique" in str(exc) or "unique" in str(exc).lower():
+            return {"received": True, "processed": False, "reason": "duplicate_event"}
+        raise
+
+    # Handle payment.failed — mark the payment record as failed.
+    if event_type == "payment.failed":
+        with get_engine().begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    update public.payments
+                    set status = 'failed',
+                        provider_payment_id = :payment_id,
+                        updated_at = timezone('utc', now())
+                    where id = :id
+                      and status not in ('captured', 'refunded')
+                    """
+                ),
+                {"payment_id": payment_id, "id": str(row["id"])},
+            )
+        return {"received": True, "processed": True, "event": "payment.failed"}
+
+    # Handle payment.captured — finalize quota grant.
     result = payment_service.finalize_payment(
         str(row["user_id"]),
         order_id,
         payment_id,
         None,
     )
-    return {"received": True, "processed": True, "result": result}
+    return {"received": True, "processed": True, "event": "payment.captured", "result": result}

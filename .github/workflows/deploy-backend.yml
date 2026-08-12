@@ -160,52 +160,152 @@ jobs:
 
           echo "==> Post-deploy API smoke checks"
           TMP_DIR="$(mktemp -d)"
-          TEST_EMAIL="ci-auth-$(date +%s)-$RANDOM@gmail.com"
-          export SMOKE_TEST_EMAIL="$TEST_EMAIL"
-          export SMOKE_TEST_DB_URL="$SUPABASE_DB_URL"
+          TEST_EMAIL="ci-auth-$(date +%s)-$RANDOM@jobauto.internal"
           trap 'rm -rf "$TMP_DIR"' EXIT
-          assert_status() { if [ "$1" != "$2" ]; then echo "ERROR: expected HTTP $1, got $2"; cat "$3" || true; exit 1; fi; }
+          assert_status() { if [ "$1" != "$2" ]; then echo "ERROR: expected HTTP $1, got $2 for $4"; cat "$3" || true; exit 1; fi; }
 
+          # --- 1. Health checks ---
           status=$(curl -sS -o "$TMP_DIR/db.json" -w '%{http_code}' http://127.0.0.1:8004/api/v1/health/database)
-          assert_status 200 "$status" "$TMP_DIR/db.json"
+          assert_status 200 "$status" "$TMP_DIR/db.json" "database health"
+          echo "database health: PASS"
+
           status=$(curl -sS -o "$TMP_DIR/plans.json" -w '%{http_code}' http://127.0.0.1:8004/api/v1/plans)
-          assert_status 200 "$status" "$TMP_DIR/plans.json"
+          assert_status 200 "$status" "$TMP_DIR/plans.json" "plans endpoint"
           "$VENV/python" - "$TMP_DIR/plans.json" <<'PY'
           import json,sys
           data=json.load(open(sys.argv[1]))
-          assert len(data["plans"]) == 5
+          assert len(data["plans"]) == 5, f"expected 5 plans, got {len(data['plans'])}"
+          codes = {p["code"] for p in data["plans"]}
+          assert codes == {"free","starter","growth","pro","business"}, f"unexpected plan codes: {codes}"
           print("plans: PASS")
           PY
 
+          # --- 2. Unauthenticated rejection checks ---
           for endpoint in auth/me account/me admin/users; do
             status=$(curl -sS -o "$TMP_DIR/no-token.json" -w '%{http_code}' "http://127.0.0.1:8004/api/v1/$endpoint")
-            assert_status 401 "$status" "$TMP_DIR/no-token.json"
+            assert_status 401 "$status" "$TMP_DIR/no-token.json" "$endpoint without token"
           done
-          status=$(curl -sS -o "$TMP_DIR/fake-me.json" -w '%{http_code}' -H 'Authorization: Bearer invalid-token' http://127.0.0.1:8004/api/v1/auth/me)
-          assert_status 401 "$status" "$TMP_DIR/fake-me.json"
+          echo "unauthenticated rejections: PASS"
 
-          status=$(curl -sS -o "$TMP_DIR/jobs.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/jobs/search -H 'Content-Type: application/json' --data '{"platform":"naukri","job_title":"react","location":"pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}')
-          assert_status 401 "$status" "$TMP_DIR/jobs.json"
+          status=$(curl -sS -o "$TMP_DIR/fake-me.json" -w '%{http_code}' \
+            -H 'Authorization: Bearer invalid-token' \
+            http://127.0.0.1:8004/api/v1/auth/me)
+          assert_status 401 "$status" "$TMP_DIR/fake-me.json" "fake token"
+          echo "fake token rejection: PASS"
 
-          status=$(curl -sS -o "$TMP_DIR/signup.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/signup -H 'Content-Type: application/json' --data "{\"email\":\"$TEST_EMAIL\",\"password\":\"TestPassword123!\",\"full_name\":\"CI Auth Test\"}")
+          status=$(curl -sS -o "$TMP_DIR/jobs-unauth.json" -w '%{http_code}' \
+            -X POST http://127.0.0.1:8004/api/v1/jobs/search \
+            -H 'Content-Type: application/json' \
+            --data '{"platform":"naukri","job_title":"react","location":"pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}')
+          assert_status 401 "$status" "$TMP_DIR/jobs-unauth.json" "job search without token"
+          echo "job search unauthenticated rejection: PASS"
+
+          # --- 3. Auth error path checks (no real user needed) ---
+          status=$(curl -sS -o "$TMP_DIR/refresh.json" -w '%{http_code}' \
+            -X POST http://127.0.0.1:8004/api/v1/auth/refresh \
+            -H 'Content-Type: application/json' \
+            --data '{"refresh_token":"invalid-refresh-token-value-123456"}')
+          if [ "$status" -lt 400 ]; then echo "ERROR: invalid refresh unexpectedly succeeded"; exit 1; fi
+          echo "invalid refresh rejection: PASS"
+
+          status=$(curl -sS -o "$TMP_DIR/password.json" -w '%{http_code}' \
+            -X PUT http://127.0.0.1:8004/api/v1/auth/password \
+            -H 'Authorization: Bearer invalid-token' \
+            -H 'Content-Type: application/json' \
+            --data '{"password":"AnotherPassword123!"}')
+          assert_status 401 "$status" "$TMP_DIR/password.json" "password update with invalid token"
+          echo "password update invalid token: PASS"
+
+          status=$(curl -sS -o "$TMP_DIR/logout.json" -w '%{http_code}' \
+            -X POST http://127.0.0.1:8004/api/v1/auth/logout \
+            -H 'Authorization: Bearer invalid-token')
+          assert_status 401 "$status" "$TMP_DIR/logout.json" "logout with invalid token"
+          echo "logout invalid token: PASS"
+
+          status=$(curl -sS -o "$TMP_DIR/reset.json" -w '%{http_code}' \
+            -X POST http://127.0.0.1:8004/api/v1/auth/password-reset \
+            -H 'Content-Type: application/json' \
+            --data '{"email":"nobody-ci@example.com"}')
+          assert_status 202 "$status" "$TMP_DIR/reset.json" "password reset"
+          echo "password reset: PASS"
+
+          # --- 4. Full authenticated flow ---
+          # Try signup. 429 from Supabase email rate limit is acceptable.
+          status=$(curl -sS -o "$TMP_DIR/signup.json" -w '%{http_code}' \
+            -X POST http://127.0.0.1:8004/api/v1/auth/signup \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$TEST_EMAIL\",\"password\":\"TestPassword123!\",\"full_name\":\"CI Auth Test\"}")
+
           if [ "$status" = "201" ]; then
             echo "signup: PASS (201)"
+
+            # Extract session token if Supabase returned one (no email confirmation required).
+            CI_TOKEN=$("$VENV/python" - "$TMP_DIR/signup.json" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          s = d.get("session") or {}
+          print(s.get("access_token", ""))
+          PY
+            )
+
+            if [ -n "$CI_TOKEN" ]; then
+              echo "==> Running authenticated smoke tests with CI token"
+
+              # GET /auth/me with valid token → 200
+              status=$(curl -sS -o "$TMP_DIR/auth-me.json" -w '%{http_code}' \
+                -H "Authorization: Bearer $CI_TOKEN" \
+                http://127.0.0.1:8004/api/v1/auth/me)
+              assert_status 200 "$status" "$TMP_DIR/auth-me.json" "GET /auth/me with valid token"
+              echo "GET /auth/me authenticated: PASS"
+
+              # GET /account/me with valid token → 200 and has quota fields
+              status=$(curl -sS -o "$TMP_DIR/account-me.json" -w '%{http_code}' \
+                -H "Authorization: Bearer $CI_TOKEN" \
+                http://127.0.0.1:8004/api/v1/account/me)
+              assert_status 200 "$status" "$TMP_DIR/account-me.json" "GET /account/me with valid token"
+              "$VENV/python" - "$TMP_DIR/account-me.json" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          assert "usage" in d, f"missing usage field: {d}"
+          assert d["usage"]["plan_code"] == "free", f"new user should be on free plan, got: {d['usage']['plan_code']}"
+          assert d["usage"]["granted_searches"] == 50, f"free plan should grant 50 searches, got: {d['usage']['granted_searches']}"
+          assert d["usage"]["remaining_searches"] == 50, f"new user should have 50 remaining, got: {d['usage']['remaining_searches']}"
+          print("account/me quota: PASS")
+          PY
+
+              # Admin endpoints must reject the regular CI user → 403
+              status=$(curl -sS -o "$TMP_DIR/admin-reject.json" -w '%{http_code}' \
+                -H "Authorization: Bearer $CI_TOKEN" \
+                http://127.0.0.1:8004/api/v1/admin/users)
+              assert_status 403 "$status" "$TMP_DIR/admin-reject.json" "admin endpoint rejects regular user"
+              echo "admin endpoint rejects regular user: PASS"
+
+              # Logout → 204
+              status=$(curl -sS -o "$TMP_DIR/logout-ok.json" -w '%{http_code}' \
+                -X POST http://127.0.0.1:8004/api/v1/auth/logout \
+                -H "Authorization: Bearer $CI_TOKEN")
+              assert_status 204 "$status" "$TMP_DIR/logout-ok.json" "logout with valid token"
+              echo "logout with valid token: PASS"
+
+              # Token should now be rejected → 401
+              status=$(curl -sS -o "$TMP_DIR/after-logout.json" -w '%{http_code}' \
+                -H "Authorization: Bearer $CI_TOKEN" \
+                http://127.0.0.1:8004/api/v1/auth/me)
+              assert_status 401 "$status" "$TMP_DIR/after-logout.json" "token rejected after logout"
+              echo "token rejected after logout: PASS"
+
+              echo "FULL AUTHENTICATED FLOW: PASS"
+            else
+              echo "signup: email confirmation required — skipping token-based auth tests (acceptable)"
+            fi
+
           elif [ "$status" = "429" ]; then
-            echo "signup: Supabase reached; email rate limit currently active (429)"
+            echo "signup: Supabase email rate limit active (429) — skipping authenticated flow tests"
             cat "$TMP_DIR/signup.json"
           else
             echo "ERROR: signup returned unexpected HTTP $status"
             cat "$TMP_DIR/signup.json"
             exit 1
           fi
-
-          status=$(curl -sS -o "$TMP_DIR/refresh.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/refresh -H 'Content-Type: application/json' --data '{"refresh_token":"invalid-refresh-token-value-123456"}')
-          if [ "$status" -lt 400 ]; then echo "ERROR: invalid refresh unexpectedly succeeded"; exit 1; fi
-          status=$(curl -sS -o "$TMP_DIR/password.json" -w '%{http_code}' -X PUT http://127.0.0.1:8004/api/v1/auth/password -H 'Authorization: Bearer invalid-token' -H 'Content-Type: application/json' --data '{"password":"AnotherPassword123!"}')
-          assert_status 401 "$status" "$TMP_DIR/password.json"
-          status=$(curl -sS -o "$TMP_DIR/logout.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H 'Authorization: Bearer invalid-token')
-          assert_status 401 "$status" "$TMP_DIR/logout.json"
-          status=$(curl -sS -o "$TMP_DIR/reset.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/password-reset -H 'Content-Type: application/json' --data '{"email":"nobody-ci@example.com"}')
-          assert_status 202 "$status" "$TMP_DIR/reset.json"
 
           echo "POST-DEPLOY API SMOKE CHECKS: PASS"

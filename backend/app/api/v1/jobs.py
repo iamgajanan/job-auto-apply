@@ -33,13 +33,17 @@ def search_jobs(
     service: JobService = Depends(get_job_service),
 ):
     client_ip = http_request.client.host if http_request.client else "unknown"
-    jobs = service.search_jobs(request, client_ip)
 
     # Super admins are unlimited for testing/operations and are not charged.
     if current_user.profile.role == "super_admin":
+        jobs = service.search_jobs(request, client_ip)
         response.headers["X-Searches-Remaining"] = "unlimited"
         return {"jobs": jobs}
 
+    # Consume quota BEFORE running the scraper.
+    # Quota is charged on attempt (not on success) because the scraper resource
+    # is consumed regardless of whether results are returned. This also prevents
+    # a user with 0 quota from triggering an expensive Playwright session.
     request_id = uuid4()
     try:
         with get_engine().begin() as connection:
@@ -75,5 +79,7 @@ def search_jobs(
             ) from exc
         raise
 
+    # Quota successfully consumed — now run the scraper.
+    jobs = service.search_jobs(request, client_ip)
     response.headers["X-Searches-Remaining"] = str(quota["remaining_searches"])
     return {"jobs": jobs}
