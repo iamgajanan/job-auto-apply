@@ -5,16 +5,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import text
 
 from app.auth.dependencies import bearer_scheme, get_current_user, load_profile
-from app.auth.schemas import (
-    AuthResponse,
-    CurrentUser,
-    LoginRequest,
-    PasswordResetRequest,
-    PasswordUpdateRequest,
-    RefreshRequest,
-    Session,
-    SignupRequest,
-)
+from app.auth.schemas import AuthResponse, CurrentUser, LoginRequest, PasswordResetRequest, PasswordUpdateRequest, RefreshRequest, Session, SignupRequest
 from app.auth.service import SupabaseAuthError, auth_service
 from app.db.connection import get_engine
 
@@ -24,51 +15,27 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 def _session(payload: dict) -> Session | None:
     if not payload.get("access_token"):
         return None
-    return Session(
-        access_token=payload["access_token"],
-        refresh_token=payload.get("refresh_token", ""),
-        token_type=payload.get("token_type", "bearer"),
-        expires_in=payload.get("expires_in"),
-        expires_at=payload.get("expires_at"),
-    )
+    return Session(access_token=payload["access_token"], refresh_token=payload.get("refresh_token", ""), token_type=payload.get("token_type", "bearer"), expires_in=payload.get("expires_in"), expires_at=payload.get("expires_at"))
 
 
 def _profile_for_user(user_id: str, email: str | None = None, full_name: str | None = None):
     from app.auth.schemas import UserProfile
-
     with get_engine().connect() as connection:
-        row = connection.execute(
-            text(
-                """
-                select id, email, full_name, role, status, plan_code
-                from public.profiles
-                where id = :id
-                """
-            ),
-            {"id": user_id},
-        ).mappings().one_or_none()
-
+        row = connection.execute(text("select id, email, full_name, role, status, plan_code from public.profiles where id = :id"), {"id": user_id}).mappings().one_or_none()
     if row:
         return UserProfile(**dict(row))
-
     return load_profile(UUID(user_id), email, full_name)
 
 
 def _unauthorized_status(exc: SupabaseAuthError) -> int:
-    """Map invalid/expired credentials to 401 without hiding service failures."""
-    if exc.status_code in (401, 403):
-        return status.HTTP_401_UNAUTHORIZED
-    return exc.status_code
+    return status.HTTP_401_UNAUTHORIZED if exc.status_code in (401, 403) else exc.status_code
 
 
 def _login_error(exc: SupabaseAuthError) -> tuple[int, str]:
-    """Return a useful public error without leaking Supabase internals."""
     if exc.status_code in (429, 500, 502, 503):
         return exc.status_code, str(exc)
-
     if exc.status_code == 400 and str(exc).strip().lower() == "email not confirmed":
         return status.HTTP_403_FORBIDDEN, "Email confirmation required"
-
     return status.HTTP_401_UNAUTHORIZED, "Invalid email or password"
 
 
@@ -78,18 +45,12 @@ def signup(request: SignupRequest):
         payload = auth_service.signup(request.email.lower(), request.password, request.full_name)
     except SupabaseAuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
     user = payload.get("user") or {}
     user_id = user.get("id")
     if not user_id:
-        raise HTTPException(status_code=502, detail="Supabase did not return a user")
-
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Signup is temporarily rate limited. Please try again later.")
     profile = load_profile(UUID(user_id), user.get("email"), request.full_name)
-    return AuthResponse(
-        user=profile,
-        session=_session(payload),
-        email_confirmation_required=payload.get("session") is None,
-    )
+    return AuthResponse(user=profile, session=_session(payload), email_confirmation_required=payload.get("session") is None)
 
 
 @router.post("/login", response_model=AuthResponse)
@@ -99,19 +60,12 @@ def login(request: LoginRequest):
     except SupabaseAuthError as exc:
         error_status, detail = _login_error(exc)
         raise HTTPException(status_code=error_status, detail=detail) from exc
-
     user = payload.get("user") or {}
     if not user.get("id"):
         raise HTTPException(status_code=502, detail="Supabase did not return a user")
-
-    profile = load_profile(
-        UUID(user["id"]),
-        user.get("email"),
-        (user.get("user_metadata") or {}).get("full_name"),
-    )
+    profile = load_profile(UUID(user["id"]), user.get("email"), (user.get("user_metadata") or {}).get("full_name"))
     if profile.status != "active":
         raise HTTPException(status_code=403, detail="Account is not active")
-
     return AuthResponse(user=profile, session=_session(payload))
 
 
@@ -120,11 +74,7 @@ def refresh(request: RefreshRequest):
     try:
         payload = auth_service.refresh(request.refresh_token)
     except SupabaseAuthError as exc:
-        raise HTTPException(
-            status_code=_unauthorized_status(exc),
-            detail="Refresh token is invalid or expired",
-        ) from exc
-
+        raise HTTPException(status_code=_unauthorized_status(exc), detail="Refresh token is invalid or expired") from exc
     session = _session(payload)
     if not session:
         raise HTTPException(status_code=502, detail="Supabase did not return a refreshed session")
@@ -141,19 +91,13 @@ def password_reset(request: PasswordResetRequest):
 
 
 @router.put("/password", status_code=status.HTTP_204_NO_CONTENT)
-def update_password(
-    request: PasswordUpdateRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-):
+def update_password(request: PasswordUpdateRequest, credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
     if not credentials:
         raise HTTPException(status_code=401, detail="Authentication required")
     try:
         auth_service.update_password(credentials.credentials, request.password)
     except SupabaseAuthError as exc:
-        raise HTTPException(
-            status_code=_unauthorized_status(exc),
-            detail="Unable to update password",
-        ) from exc
+        raise HTTPException(status_code=_unauthorized_status(exc), detail="Unable to update password") from exc
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -163,10 +107,7 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
     try:
         auth_service.logout(credentials.credentials)
     except SupabaseAuthError as exc:
-        raise HTTPException(
-            status_code=_unauthorized_status(exc),
-            detail="Unable to sign out",
-        ) from exc
+        raise HTTPException(status_code=_unauthorized_status(exc), detail="Unable to sign out") from exc
 
 
 @router.get("/me", response_model=CurrentUser)
