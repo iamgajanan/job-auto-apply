@@ -2,8 +2,7 @@ name: Deploy Backend to Raspberry Pi
 
 on:
   push:
-    branches:
-      - just-scrapping
+    branches: [just-scrapping]
   workflow_dispatch:
 
 concurrency:
@@ -14,32 +13,24 @@ jobs:
   migrate-database:
     name: Apply Supabase database migrations
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Supabase CLI
-        uses: supabase/setup-cli@v1
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
         with:
           version: latest
-
-      - name: Verify committed Supabase configuration
-        run: test -f supabase/config.toml && test -d supabase/migrations
-
       - name: Apply database migrations
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           set -Eeuo pipefail
-          test -n "$SUPABASE_DB_URL" || { echo "ERROR: GitHub Actions secret SUPABASE_DB_URL is not configured"; exit 1; }
+          test -n "$SUPABASE_DB_URL"
+          test -f supabase/config.toml
           supabase --yes db push --db-url "$SUPABASE_DB_URL"
 
   deploy:
     name: Deploy FastAPI backend
     needs: migrate-database
     runs-on: [self-hosted, linux, arm64]
-
     steps:
       - name: Deploy just-scrapping to Raspberry Pi
         shell: bash
@@ -54,224 +45,131 @@ jobs:
           CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
         run: |
           set -Eeuo pipefail
-          APP_DIR="/home/iamgajanan/Projects/job-auto-apply"
-          BACKEND_DIR="$APP_DIR/backend"
-          VENV="$BACKEND_DIR/.venv/bin"
-          BRANCH="just-scrapping"
-          AUTH_KEY="${SUPABASE_PUBLISHABLE_KEY:-}"
-          if [ -z "$AUTH_KEY" ]; then AUTH_KEY="${SUPABASE_ANON_KEY:-}"; fi
-
-          test -d "$APP_DIR/.git" || { echo "ERROR: $APP_DIR is not a Git repository"; exit 1; }
-          test -x "$VENV/python" || { echo "ERROR: backend virtualenv not found at $VENV"; exit 1; }
-          test -n "$SUPABASE_DB_URL" || { echo "ERROR: SUPABASE_DB_URL secret is not available"; exit 1; }
-          test -n "$SUPABASE_URL" || { echo "ERROR: SUPABASE_URL secret is not available"; exit 1; }
-          test -n "$AUTH_KEY" || { echo "ERROR: SUPABASE_PUBLISHABLE_KEY (or legacy SUPABASE_ANON_KEY) secret is not available"; exit 1; }
+          APP_DIR=/home/iamgajanan/Projects/job-auto-apply
+          BACKEND_DIR=$APP_DIR/backend
+          VENV=$BACKEND_DIR/.venv/bin
+          AUTH_KEY="${SUPABASE_PUBLISHABLE_KEY:-${SUPABASE_ANON_KEY:-}}"
+          test -d "$APP_DIR/.git"
+          test -x "$VENV/python"
+          test -n "$SUPABASE_DB_URL"
+          test -n "$SUPABASE_URL"
+          test -n "$AUTH_KEY"
 
           cd "$APP_DIR"
-          echo "==> Updating only $BRANCH"
-          git fetch --prune origin "$BRANCH"
-          git checkout "$BRANCH"
-          git reset --hard "origin/$BRANCH"
+          git fetch --prune origin just-scrapping
+          git checkout just-scrapping
+          git reset --hard origin/just-scrapping
 
-          echo "==> Installing backend dependencies"
           cd "$BACKEND_DIR"
           "$VENV/python" -m pip install --disable-pip-version-check -r requirements.txt
-          echo "==> Verifying FastAPI import"
           "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
 
-          echo "==> Updating runtime configuration"
           cd "$APP_DIR"
           SUPABASE_DB_URL="$SUPABASE_DB_URL" SUPABASE_URL="$SUPABASE_URL" SUPABASE_PUBLISHABLE_KEY="$AUTH_KEY" RAZORPAY_KEY_ID="$RAZORPAY_KEY_ID" RAZORPAY_KEY_SECRET="$RAZORPAY_KEY_SECRET" RAZORPAY_WEBHOOK_SECRET="$RAZORPAY_WEBHOOK_SECRET" CORS_ORIGINS="$CORS_ORIGINS" "$VENV/python" - <<'PY'
           import os
           from pathlib import Path
-          env_path = Path("/home/iamgajanan/Projects/job-auto-apply/.env")
-          lines = env_path.read_text().splitlines() if env_path.exists() else []
-          managed = {
-              "DATABASE_URL": os.environ["SUPABASE_DB_URL"],
-              "SUPABASE_URL": os.environ["SUPABASE_URL"],
-              "SUPABASE_PUBLISHABLE_KEY": os.environ["SUPABASE_PUBLISHABLE_KEY"],
-              "RAZORPAY_KEY_ID": os.environ.get("RAZORPAY_KEY_ID", ""),
-              "RAZORPAY_KEY_SECRET": os.environ.get("RAZORPAY_KEY_SECRET", ""),
-              "RAZORPAY_WEBHOOK_SECRET": os.environ.get("RAZORPAY_WEBHOOK_SECRET", ""),
+          p=Path('/home/iamgajanan/Projects/job-auto-apply/.env')
+          lines=p.read_text().splitlines() if p.exists() else []
+          managed={
+            'DATABASE_URL':os.environ['SUPABASE_DB_URL'],
+            'SUPABASE_URL':os.environ['SUPABASE_URL'],
+            'SUPABASE_PUBLISHABLE_KEY':os.environ['SUPABASE_PUBLISHABLE_KEY'],
+            'RAZORPAY_KEY_ID':os.environ.get('RAZORPAY_KEY_ID',''),
+            'RAZORPAY_KEY_SECRET':os.environ.get('RAZORPAY_KEY_SECRET',''),
+            'RAZORPAY_WEBHOOK_SECRET':os.environ.get('RAZORPAY_WEBHOOK_SECRET',''),
           }
-          if os.environ.get("CORS_ORIGINS"):
-              managed["CORS_ORIGINS"] = os.environ["CORS_ORIGINS"]
-          remaining = [line for line in lines if line.split("=", 1)[0] not in managed]
-          remaining.extend(f"{key}={value}" for key, value in managed.items())
-          env_path.write_text("\n".join(remaining) + "\n")
-          env_path.chmod(0o600)
+          if os.environ.get('CORS_ORIGINS'):
+            managed['CORS_ORIGINS']=os.environ['CORS_ORIGINS']
+          lines=[x for x in lines if x.split('=',1)[0] not in managed]
+          lines += [f'{k}={v}' for k,v in managed.items()]
+          p.write_text('\n'.join(lines)+'\n')
+          p.chmod(0o600)
           PY
 
-          echo "==> Installing and restarting backend service"
           sudo -n install -m 0644 "$APP_DIR/deploy/job-auto-apply.service" /etc/systemd/system/job-auto-apply.service
           sudo -n systemctl daemon-reload
           sudo -n systemctl enable job-auto-apply.service
           sudo -n systemctl restart job-auto-apply.service
 
-          echo "==> Waiting for backend on port 8004"
           for i in {1..30}; do
-            if curl -fsS --max-time 3 http://127.0.0.1:8004/ >/tmp/job-auto-apply-health.json; then
-              echo "Backend health check passed"
-              cat /tmp/job-auto-apply-health.json
-              break
-            fi
-            if [ "$i" -eq 30 ]; then
-              echo "ERROR: Backend did not become healthy on port 8004"
-              sudo -n systemctl --no-pager --full status job-auto-apply.service || true
-              sudo -n journalctl -u job-auto-apply.service -n 80 --no-pager || true
-              exit 1
-            fi
+            if curl -fsS --max-time 3 http://127.0.0.1:8004/ >/tmp/job-health.json; then break; fi
+            [ "$i" -lt 30 ] || { sudo -n systemctl status job-auto-apply.service --no-pager || true; sudo -n journalctl -u job-auto-apply.service -n 80 --no-pager || true; exit 1; }
             sleep 2
           done
+          cat /tmp/job-health.json
 
-          echo "==> Restarting active Cloudflare tunnel"
-          sudo -n systemctl cat cloudflared-n8n.service >/dev/null 2>&1 || {
-            echo "ERROR: cloudflared-n8n.service not installed on Raspberry Pi"
-            exit 1
-          }
           sudo -n systemctl restart cloudflared-n8n.service
           sleep 3
-          sudo -n systemctl is-active --quiet cloudflared-n8n.service || {
-            echo "ERROR: cloudflared-n8n.service is not active"
-            sudo -n systemctl --no-pager --full status cloudflared-n8n.service || true
-            sudo -n journalctl -u cloudflared-n8n.service -n 80 --no-pager || true
-            exit 1
-          }
-          echo "Cloudflare tunnel service: ACTIVE"
-          pgrep -af 'cloudflared.*config.*\.cloudflared/config\.yml' || true
-          sudo -n journalctl -u cloudflared-n8n.service -n 30 --no-pager || true
+          sudo -n systemctl is-active --quiet cloudflared-n8n.service
 
-          echo "==> Verifying Cloudflare origin routing"
           public_ok=false
           for i in {1..5}; do
-            status=$(curl -sS -o /tmp/jobs-public.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/ || true)
-            echo "public / attempt $i: HTTP $status"
-            if [ "$status" = "200" ]; then
-              cat /tmp/jobs-public.json
-              public_ok=true
-              break
-            fi
-            cat /tmp/jobs-public.json 2>/dev/null || true
+            code=$(curl -sS -o /tmp/public.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/ || true)
+            echo "public attempt $i: $code"
+            if [ "$code" = 200 ]; then public_ok=true; cat /tmp/public.json; break; fi
             sleep 2
           done
-          if [ "$public_ok" != "true" ]; then
-            echo "ERROR: public jobs hostname is not healthy through Cloudflare"
-            sudo -n journalctl -u cloudflared-n8n.service -n 100 --no-pager || true
-            exit 1
-          fi
+          [ "$public_ok" = true ]
 
-          status=$(curl -sS -o /tmp/jobs-health-public.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/api/v1/health/database || true)
-          echo "public /api/v1/health/database: HTTP $status"
-          cat /tmp/jobs-health-public.json 2>/dev/null || true
-          if [ "$status" != "200" ]; then
-            echo "ERROR: public jobs hostname is not healthy through Cloudflare"
-            sudo -n journalctl -u cloudflared-n8n.service -n 100 --no-pager || true
-            exit 1
-          fi
+          code=$(curl -sS -o /tmp/public-db.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/api/v1/health/database || true)
+          echo "public database health: $code"
+          cat /tmp/public-db.json
+          [ "$code" = 200 ]
 
-          echo "==> Post-deploy API smoke checks"
-          TMP_DIR="$(mktemp -d)"
-          # Supabase validates the domain syntax before rate limiting. Use a
-          # syntactically valid test domain; email confirmation may still be enabled.
-          TEST_EMAIL="ci-auth-$(date +%s)-$RANDOM@example.com"
-          trap 'rm -rf "$TMP_DIR"' EXIT
-          assert_status() { if [ "$1" != "$2" ]; then echo "ERROR: expected HTTP $1, got $2 for $4"; cat "$3" || true; exit 1; fi; }
+          TMP=$(mktemp -d)
+          trap 'rm -rf "$TMP"' EXIT
+          expect(){ [ "$1" = "$2" ] || { echo "Expected $1 got $2 ($4)"; cat "$3" || true; exit 1; }; }
 
-          status=$(curl -sS -o "$TMP_DIR/db.json" -w '%{http_code}' http://127.0.0.1:8004/api/v1/health/database)
-          assert_status 200 "$status" "$TMP_DIR/db.json" "database health"
-          echo "database health: PASS"
-
-          status=$(curl -sS -o "$TMP_DIR/plans.json" -w '%{http_code}' http://127.0.0.1:8004/api/v1/plans)
-          assert_status 200 "$status" "$TMP_DIR/plans.json" "plans endpoint"
-          "$VENV/python" - "$TMP_DIR/plans.json" <<'PY'
+          code=$(curl -sS -o "$TMP/db" -w '%{http_code}' http://127.0.0.1:8004/api/v1/health/database); expect 200 "$code" "$TMP/db" db-health
+          code=$(curl -sS -o "$TMP/plans" -w '%{http_code}' http://127.0.0.1:8004/api/v1/plans); expect 200 "$code" "$TMP/plans" plans
+          "$VENV/python" - "$TMP/plans" <<'PY'
           import json,sys
-          data=json.load(open(sys.argv[1]))
-          assert len(data["plans"]) == 5, f"expected 5 plans, got {len(data['plans'])}"
-          codes = {p["code"] for p in data["plans"]}
-          assert codes == {"free","starter","growth","pro","business"}, f"unexpected plan codes: {codes}"
-          print("plans: PASS")
+          d=json.load(open(sys.argv[1]))
+          assert len(d['plans'])==5
+          assert {p['code'] for p in d['plans']}=={'free','starter','growth','pro','business'}
           PY
 
-          for endpoint in auth/me account/me admin/users; do
-            status=$(curl -sS -o "$TMP_DIR/no-token.json" -w '%{http_code}' "http://127.0.0.1:8004/api/v1/$endpoint")
-            assert_status 401 "$status" "$TMP_DIR/no-token.json" "$endpoint without token"
+          for ep in auth/me account/me admin/users; do
+            code=$(curl -sS -o "$TMP/noauth" -w '%{http_code}' "http://127.0.0.1:8004/api/v1/$ep")
+            expect 401 "$code" "$TMP/noauth" "$ep-no-token"
           done
-          echo "unauthenticated rejections: PASS"
+          code=$(curl -sS -o "$TMP/fake" -w '%{http_code}' -H 'Authorization: Bearer invalid-token' http://127.0.0.1:8004/api/v1/auth/me); expect 401 "$code" "$TMP/fake" fake-token
+          code=$(curl -sS -o "$TMP/jobs" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/jobs/search -H 'Content-Type: application/json' --data '{"platform":"naukri","job_title":"react","location":"pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}'); expect 401 "$code" "$TMP/jobs" unauthenticated-job-search
+          code=$(curl -sS -o "$TMP/refresh" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/refresh -H 'Content-Type: application/json' --data '{"refresh_token":"invalid-refresh-token-value-123456"}'); [ "$code" -ge 400 ]
+          code=$(curl -sS -o "$TMP/password" -w '%{http_code}' -X PUT http://127.0.0.1:8004/api/v1/auth/password -H 'Authorization: Bearer invalid-token' -H 'Content-Type: application/json' --data '{"password":"AnotherPassword123!"}'); expect 401 "$code" "$TMP/password" invalid-password-token
+          code=$(curl -sS -o "$TMP/logout" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H 'Authorization: Bearer invalid-token'); expect 401 "$code" "$TMP/logout" invalid-logout-token
+          code=$(curl -sS -o "$TMP/reset" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/password-reset -H 'Content-Type: application/json' --data '{"email":"nobody-ci@example.com"}'); expect 202 "$code" "$TMP/reset" password-reset
 
-          status=$(curl -sS -o "$TMP_DIR/fake-me.json" -w '%{http_code}' -H 'Authorization: Bearer invalid-token' http://127.0.0.1:8004/api/v1/auth/me)
-          assert_status 401 "$status" "$TMP_DIR/fake-me.json" "fake token"
-          echo "fake token rejection: PASS"
-
-          status=$(curl -sS -o "$TMP_DIR/jobs-unauth.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/jobs/search -H 'Content-Type: application/json' --data '{"platform":"naukri","job_title":"react","location":"pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}')
-          assert_status 401 "$status" "$TMP_DIR/jobs-unauth.json" "job search without token"
-          echo "job search unauthenticated rejection: PASS"
-
-          status=$(curl -sS -o "$TMP_DIR/refresh.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/refresh -H 'Content-Type: application/json' --data '{"refresh_token":"invalid-refresh-token-value-123456"}')
-          if [ "$status" -lt 400 ]; then echo "ERROR: invalid refresh unexpectedly succeeded"; exit 1; fi
-          echo "invalid refresh rejection: PASS"
-
-          status=$(curl -sS -o "$TMP_DIR/password.json" -w '%{http_code}' -X PUT http://127.0.0.1:8004/api/v1/auth/password -H 'Authorization: Bearer invalid-token' -H 'Content-Type: application/json' --data '{"password":"AnotherPassword123!"}')
-          assert_status 401 "$status" "$TMP_DIR/password.json" "password update with invalid token"
-          echo "password update invalid token: PASS"
-
-          status=$(curl -sS -o "$TMP_DIR/logout.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H 'Authorization: Bearer invalid-token')
-          assert_status 401 "$status" "$TMP_DIR/logout.json" "logout with invalid token"
-          echo "logout invalid token: PASS"
-
-          status=$(curl -sS -o "$TMP_DIR/reset.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/password-reset -H 'Content-Type: application/json' --data '{"email":"nobody-ci@example.com"}')
-          assert_status 202 "$status" "$TMP_DIR/reset.json" "password reset"
-          echo "password reset: PASS"
-
-          status=$(curl -sS -o "$TMP_DIR/signup.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/signup -H 'Content-Type: application/json' --data "{\"email\":\"$TEST_EMAIL\",\"password\":\"TestPassword123!\",\"full_name\":\"CI Auth Test\"}")
-          if [ "$status" = "201" ]; then
-            echo "signup: PASS (201)"
-            CI_TOKEN=$("$VENV/python" - "$TMP_DIR/signup.json" <<'PY'
-          import json, sys
-          d = json.load(open(sys.argv[1]))
-          s = d.get("session") or {}
-          print(s.get("access_token", ""))
+          TEST_EMAIL="iamgajanan12+ci-$(date +%s)-$RANDOM@gmail.com"
+          code=$(curl -sS -o "$TMP/signup" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/signup -H 'Content-Type: application/json' --data "{\"email\":\"$TEST_EMAIL\",\"password\":\"TestPassword123!\",\"full_name\":\"CI Auth Test\"}")
+          if [ "$code" = 201 ]; then
+            echo 'signup: PASS'
+            TOKEN=$("$VENV/python" - "$TMP/signup" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); print((d.get('session') or {}).get('access_token',''))
           PY
             )
-            if [ -n "$CI_TOKEN" ]; then
-              echo "==> Running authenticated smoke tests with CI token"
-              status=$(curl -sS -o "$TMP_DIR/auth-me.json" -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
-              assert_status 200 "$status" "$TMP_DIR/auth-me.json" "GET /auth/me with valid token"
-              echo "GET /auth/me authenticated: PASS"
-
-              status=$(curl -sS -o "$TMP_DIR/account-me.json" -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" http://127.0.0.1:8004/api/v1/account/me)
-              assert_status 200 "$status" "$TMP_DIR/account-me.json" "GET /account/me with valid token"
-              "$VENV/python" - "$TMP_DIR/account-me.json" <<'PY'
-          import json, sys
-          d = json.load(open(sys.argv[1]))
-          assert "usage" in d, f"missing usage field: {d}"
-          assert d["usage"]["plan_code"] == "free", f"new user should be on free plan, got: {d['usage']['plan_code']}"
-          assert d["usage"]["granted_searches"] == 50, f"free plan should grant 50 searches, got: {d['usage']['granted_searches']}"
-          assert d["usage"]["remaining_searches"] == 50, f"new user should have 50 remaining, got: {d['usage']['remaining_searches']}"
-          print("account/me quota: PASS")
+            if [ -n "$TOKEN" ]; then
+              code=$(curl -sS -o "$TMP/me" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me); expect 200 "$code" "$TMP/me" authenticated-me
+              code=$(curl -sS -o "$TMP/account" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/account/me); expect 200 "$code" "$TMP/account" authenticated-account
+              "$VENV/python" - "$TMP/account" <<'PY'
+          import json,sys
+          u=json.load(open(sys.argv[1]))['usage']
+          assert u['plan_code']=='free' and u['granted_searches']==50 and u['remaining_searches']==50
           PY
-
-              status=$(curl -sS -o "$TMP_DIR/admin-reject.json" -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" http://127.0.0.1:8004/api/v1/admin/users)
-              assert_status 403 "$status" "$TMP_DIR/admin-reject.json" "admin endpoint rejects regular user"
-              echo "admin endpoint rejects regular user: PASS"
-
-              status=$(curl -sS -o "$TMP_DIR/logout-ok.json" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $CI_TOKEN")
-              assert_status 204 "$status" "$TMP_DIR/logout-ok.json" "logout with valid token"
-              echo "logout with valid token: PASS"
-
-              status=$(curl -sS -o "$TMP_DIR/after-logout.json" -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
-              assert_status 401 "$status" "$TMP_DIR/after-logout.json" "token rejected after logout"
-              echo "token rejected after logout: PASS"
-              echo "FULL AUTHENTICATED FLOW: PASS"
+              code=$(curl -sS -o "$TMP/admin" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/admin/users); expect 403 "$code" "$TMP/admin" regular-user-admin-rejection
+              code=$(curl -sS -o "$TMP/out" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $TOKEN"); expect 204 "$code" "$TMP/out" logout
+              code=$(curl -sS -o "$TMP/after" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me); expect 401 "$code" "$TMP/after" post-logout
+              echo 'FULL AUTHENTICATED FLOW: PASS'
             else
-              echo "signup: email confirmation required — skipping token-based auth tests (acceptable)"
+              echo 'signup succeeded but email confirmation is enabled; token flow skipped'
             fi
-          elif [ "$status" = "429" ]; then
-            echo "signup: Supabase email rate limit active (429) — skipping authenticated flow tests"
-            cat "$TMP_DIR/signup.json"
+          elif [ "$code" = 429 ]; then
+            echo 'signup reached Supabase but email rate limit is active (429); auth flow skipped'
+            cat "$TMP/signup"
           else
-            echo "ERROR: signup returned unexpected HTTP $status"
-            cat "$TMP_DIR/signup.json"
+            echo "ERROR: signup returned HTTP $code"
+            cat "$TMP/signup"
             exit 1
           fi
-
-          echo "POST-DEPLOY API SMOKE CHECKS: PASS"
+          echo 'POST-DEPLOY API SMOKE CHECKS: PASS'
