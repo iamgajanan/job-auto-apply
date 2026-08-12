@@ -61,11 +61,15 @@ def _unauthorized_status(exc: SupabaseAuthError) -> int:
     return exc.status_code
 
 
-def _login_status(exc: SupabaseAuthError) -> int:
-    """Keep rate-limit/service failures visible while normalizing bad credentials."""
+def _login_error(exc: SupabaseAuthError) -> tuple[int, str]:
+    """Return a useful public error without leaking Supabase internals."""
     if exc.status_code in (429, 500, 502, 503):
-        return exc.status_code
-    return status.HTTP_401_UNAUTHORIZED
+        return exc.status_code, str(exc)
+
+    if exc.status_code == 400 and str(exc).strip().lower() == "email not confirmed":
+        return status.HTTP_403_FORBIDDEN, "Email confirmation required"
+
+    return status.HTTP_401_UNAUTHORIZED, "Invalid email or password"
 
 
 @router.post("/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
@@ -93,7 +97,8 @@ def login(request: LoginRequest):
     try:
         payload = auth_service.login(request.email.lower(), request.password)
     except SupabaseAuthError as exc:
-        raise HTTPException(status_code=_login_status(exc), detail="Invalid email or password") from exc
+        error_status, detail = _login_error(exc)
+        raise HTTPException(status_code=error_status, detail=detail) from exc
 
     user = payload.get("user") or {}
     if not user.get("id"):
