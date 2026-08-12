@@ -125,32 +125,27 @@ jobs:
           done
 
           echo "==> Restarting active Cloudflare tunnel"
-          if systemctl list-unit-files | grep -q '^cloudflared-n8n.service'; then
-            sudo -n systemctl restart cloudflared-n8n.service
-            sleep 3
-            sudo -n systemctl is-active --quiet cloudflared-n8n.service || {
-              echo "ERROR: cloudflared-n8n.service is not active"
-              sudo -n systemctl --no-pager --full status cloudflared-n8n.service || true
-              sudo -n journalctl -u cloudflared-n8n.service -n 80 --no-pager || true
-              exit 1
-            }
-            echo "Cloudflare tunnel service: ACTIVE"
-            pgrep -af 'cloudflared.*config.*\.cloudflared/config\.yml' || true
-            sudo -n journalctl -u cloudflared-n8n.service -n 30 --no-pager || true
-          else
+          sudo -n systemctl cat cloudflared-n8n.service >/dev/null 2>&1 || {
             echo "ERROR: cloudflared-n8n.service not installed on Raspberry Pi"
             exit 1
-          fi
+          }
+          sudo -n systemctl restart cloudflared-n8n.service
+          sleep 3
+          sudo -n systemctl is-active --quiet cloudflared-n8n.service || {
+            echo "ERROR: cloudflared-n8n.service is not active"
+            sudo -n systemctl --no-pager --full status cloudflared-n8n.service || true
+            sudo -n journalctl -u cloudflared-n8n.service -n 80 --no-pager || true
+            exit 1
+          }
+          echo "Cloudflare tunnel service: ACTIVE"
+          pgrep -af 'cloudflared.*config.*\.cloudflared/config\.yml' || true
+          sudo -n journalctl -u cloudflared-n8n.service -n 30 --no-pager || true
 
           echo "==> Verifying Cloudflare origin routing"
           for i in {1..5}; do
             status=$(curl -sS -o /tmp/jobs-public.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/ || true)
             echo "public / attempt $i: HTTP $status"
-            if [ "$status" = "200" ]; then
-              cat /tmp/jobs-public.json
-            else
-              cat /tmp/jobs-public.json 2>/dev/null || true
-            fi
+            if [ "$status" = "200" ]; then cat /tmp/jobs-public.json; else cat /tmp/jobs-public.json 2>/dev/null || true; fi
             [ "$status" = "200" ] || sleep 2
           done
 
