@@ -1,6 +1,5 @@
 from pathlib import Path
 import re
-import time
 from urllib.parse import urlencode
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -115,8 +114,8 @@ class LinkedInSearch(BaseProvider):
             """
             () => {
                 const selectors = [
-                    'a[href*='/jobs/view/']',
-                    'a[href*='/jobs/collections/']'
+                    "a[href*='/jobs/view/']",
+                    "a[href*='/jobs/collections/']"
                 ];
                 const results = [];
                 const seen = new Set();
@@ -193,6 +192,7 @@ class LinkedInSearch(BaseProvider):
         else:
             app_logger.info("LinkedIn scraping via DIRECT connection (no proxy)")
 
+        page = None
         try:
             page = browser.launch(proxy_url=self.PROXY_URL)
             url = self._build_classic_url(request)
@@ -215,7 +215,6 @@ class LinkedInSearch(BaseProvider):
 
             app_logger.debug(f"LinkedIn actual URL: {page.url}")
 
-            # Wait for actual job links instead of waiting for a fixed amount of time.
             try:
                 page.wait_for_selector(
                     "a[href*='/jobs/view/']",
@@ -303,10 +302,11 @@ class LinkedInSearch(BaseProvider):
             app_logger.info(f"TOTAL LINKEDIN JOBS SCRAPED: {len(jobs)}")
             return jobs
         except Exception:
-            try:
-                self._save_debug(page, "error")
-            except Exception:
-                pass
+            if page is not None:
+                try:
+                    self._save_debug(page, "error")
+                except Exception:
+                    pass
             raise
         finally:
             browser.close()
