@@ -195,6 +195,14 @@ jobs:
           expect 403 "$code" "$TMP/admin" regular-user-admin-rejection
           echo "Local admin endpoint rejects regular user: PASS"
 
+          code=$(curl -sS --max-time 30 -o "$TMP/out" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $TOKEN")
+          expect 204 "$code" "$TMP/out" local-logout
+          echo "Local logout: PASS"
+
+          code=$(curl -sS --max-time 30 -o "$TMP/after" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
+          expect 401 "$code" "$TMP/after" post-logout-token-rejected
+          echo "Local token rejected after logout: PASS"
+
           echo "==> Public authenticated flow through Cloudflare"
           code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-login" -w '%{http_code}' \
             -X POST https://jobs.n8npi.live/api/v1/auth/login \
@@ -225,14 +233,6 @@ jobs:
           code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-after" -w '%{http_code}' -H "Authorization: Bearer $PUBLIC_TOKEN" https://jobs.n8npi.live/api/v1/auth/me)
           expect 401 "$code" "$TMP/public-after" public-post-logout-token-rejected
           echo "Public token rejected after logout: PASS"
-
-          code=$(curl -sS --max-time 30 -o "$TMP/out" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $TOKEN")
-          expect 204 "$code" "$TMP/out" logout
-          echo "Local logout: PASS"
-
-          code=$(curl -sS --max-time 30 -o "$TMP/after" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
-          expect 401 "$code" "$TMP/after" post-logout-token-rejected
-          echo "Local token rejected after logout: PASS"
 
           echo "FULL AUTHENTICATED FLOW: PASS"
           echo "PUBLIC AUTHENTICATED FLOW: PASS"
