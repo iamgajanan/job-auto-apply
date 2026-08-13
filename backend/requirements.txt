@@ -31,7 +31,7 @@ redis==7.0.1
 rsa==4.9.1
 six==1.17.0
 SQLAlchemy==2.0.51
-starlette==0.49.0
+starlette==0.49.3
 # Supabase Auth is accessed through the direct HTTP adapter in app.auth.service.
 # No local bcrypt/passlib/JWT implementation is used.
 tomli==2.4.1
