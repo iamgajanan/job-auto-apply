@@ -199,3 +199,132 @@ def remove_allowlist_email(
         if result.rowcount != 1:
             raise HTTPException(status_code=404, detail="Email not found in admin allowlist")
     return {"status": "inactive", "email": normalized}
+
+
+class CreateUserRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8)
+    full_name: str | None = Field(default=None, max_length=200)
+    plan_code: str = Field(default="free", min_length=1, max_length=50)
+    plan_searches: int | None = Field(default=None, gt=0, le=1_000_000)
+
+
+@router.post("/users", status_code=201)
+def create_user(
+    request: CreateUserRequest,
+    _: CurrentUser = Depends(require_super_admin),
+):
+    """
+    Create a user via the Supabase Admin API (service-role).
+    This bypasses the per-IP signup rate limit, so admins can create
+    test or production users at any time without hitting Supabase's
+    public signup throttle.
+    """
+    if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="SUPABASE_SERVICE_ROLE_KEY is not configured — cannot create users via admin API",
+        )
+
+    admin_url = f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/admin/users"
+    body: dict = {
+        "email": request.email.lower(),
+        "password": request.password,
+        "email_confirm": True,   # mark as confirmed so no email is sent
+    }
+    if request.full_name:
+        body["user_metadata"] = {"full_name": request.full_name}
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.post(
+                admin_url,
+                headers={
+                    "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="Supabase Admin API unavailable") from exc
+
+    if resp.status_code == 422:
+        detail = (resp.json().get("msg") or resp.json().get("message") or "User already exists or invalid data")
+        raise HTTPException(status_code=422, detail=detail)
+
+    if resp.status_code >= 400:
+        detail = resp.json().get("msg") or resp.json().get("message") or "Failed to create user"
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+
+    supabase_user = resp.json()
+    user_id = supabase_user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=502, detail="Supabase did not return a user ID")
+
+    # Ensure profile row exists (the trigger runs async — force it now).
+    profile = load_profile(UUID(user_id), request.email.lower(), request.full_name)
+
+    # Grant plan quota if a non-free plan or explicit search count was requested.
+    plan_code = request.plan_code
+    plan_searches = request.plan_searches
+
+    if plan_searches is None:
+        # Look up default quota for this plan.
+        with get_engine().connect() as connection:
+            row = connection.execute(
+                text("select search_limit from public.plans where code = :code"),
+                {"code": plan_code},
+            ).one_or_none()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Plan '{plan_code}' not found")
+            plan_searches = row[0]
+
+    # Always insert an explicit allocation (even for free) so the plan is correct.
+    with get_engine().begin() as connection:
+        # Deactivate any existing free-plan allocation added by the trigger.
+        connection.execute(
+            text(
+                """
+                update public.quota_allocations
+                set ends_at = timezone('utc', now())
+                where user_id = :uid
+                  and source = 'signup'
+                  and plan_code = 'free'
+                  and (ends_at is null or ends_at > timezone('utc', now()))
+                """
+            ),
+            {"uid": user_id},
+        )
+        # Insert the correct plan allocation.
+        connection.execute(
+            text(
+                """
+                insert into public.quota_allocations
+                    (user_id, plan_code, granted_searches, source, starts_at)
+                values
+                    (:uid, :plan_code, :searches, 'admin_create', timezone('utc', now()))
+                """
+            ),
+            {"uid": user_id, "plan_code": plan_code, "searches": plan_searches},
+        )
+        # Update profile plan_code.
+        connection.execute(
+            text(
+                """
+                update public.profiles
+                set plan_code = :plan_code, updated_at = timezone('utc', now())
+                where id = :uid
+                """
+            ),
+            {"uid": user_id, "plan_code": plan_code},
+        )
+
+    return {
+        "user_id": user_id,
+        "email": request.email.lower(),
+        "full_name": request.full_name,
+        "plan_code": plan_code,
+        "granted_searches": plan_searches,
+        "profile": dict(profile) if hasattr(profile, "__dict__") else str(profile),
+    }
