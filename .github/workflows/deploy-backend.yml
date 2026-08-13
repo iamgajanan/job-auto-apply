@@ -160,8 +160,29 @@ jobs:
 
           CI_USER="$CI_TEST_USER_EMAIL"
           CI_PASS="$CI_TEST_USER_PASSWORD"
+          echo "==> Direct Supabase Auth diagnostic for CI user"
+          CI_USER="$CI_USER" CI_PASS="$CI_PASS" "$VENV/python" - <<'PY'
+          import os
+          from app.auth.service import auth_service
+          from app.auth.dependencies import load_profile
+          from uuid import UUID
+          payload = auth_service.login(os.environ['CI_USER'], os.environ['CI_PASS'])
+          user = payload.get('user') or {}
+          if not user.get('id'):
+              raise RuntimeError('Supabase login returned no user id')
+          print('Direct Supabase login: PASS')
+          print('Auth payload keys:', sorted(payload.keys()))
+          print('User id present:', bool(user.get('id')))
+          print('Session keys:', sorted((k for k in payload.keys() if k in {'access_token','refresh_token','token_type','expires_in','expires_at'})))
+          profile = load_profile(UUID(user['id']), user.get('email'), (user.get('user_metadata') or {}).get('full_name'))
+          print('Profile load: PASS')
+          print('Profile status:', profile.status)
+          print('Profile plan:', profile.plan_code)
+          print('Profile role:', profile.role)
+          PY
+
           echo "==> Authenticated flow: logging in as $CI_USER"
-          code=$(curl -sS -o "$TMP/login" -w '%{http_code}' \
+          code=$(curl -sS --max-time 30 -o "$TMP/login" -w '%{http_code}' \
             -X POST http://127.0.0.1:8004/api/v1/auth/login \
             -H 'Content-Type: application/json' \
             --data "{\"email\":\"$CI_USER\",\"password\":\"$CI_PASS\"}")
@@ -175,11 +196,11 @@ jobs:
           [ -n "$TOKEN" ] || { echo "ERROR: login succeeded but no token returned"; cat "$TMP/login"; exit 1; }
           echo "Login: PASS — token obtained"
 
-          code=$(curl -sS -o "$TMP/me" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
+          code=$(curl -sS --max-time 30 -o "$TMP/me" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
           expect 200 "$code" "$TMP/me" authenticated-me
           echo "GET /auth/me: PASS"
 
-          code=$(curl -sS -o "$TMP/account" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/account/me)
+          code=$(curl -sS --max-time 30 -o "$TMP/account" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/account/me)
           expect 200 "$code" "$TMP/account" authenticated-account
           "$VENV/python" - "$TMP/account" <<'PY'
           import json,sys
@@ -191,15 +212,15 @@ jobs:
           print(f"GET /account/me: PASS (plan={u['plan_code']}, granted={u['granted_searches']}, remaining={u['remaining_searches']})")
           PY
 
-          code=$(curl -sS -o "$TMP/admin" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/admin/users)
+          code=$(curl -sS --max-time 30 -o "$TMP/admin" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/admin/users)
           expect 403 "$code" "$TMP/admin" regular-user-admin-rejection
           echo "Admin endpoint rejects regular user: PASS"
 
-          code=$(curl -sS -o "$TMP/out" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $TOKEN")
+          code=$(curl -sS --max-time 30 -o "$TMP/out" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $TOKEN")
           expect 204 "$code" "$TMP/out" logout
           echo "Logout: PASS"
 
-          code=$(curl -sS -o "$TMP/after" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
+          code=$(curl -sS --max-time 30 -o "$TMP/after" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
           expect 401 "$code" "$TMP/after" post-logout-token-rejected
           echo "Token rejected after logout: PASS"
 
