@@ -23,7 +23,9 @@ def _profile_for_user(user_id: str, email: str | None = None, full_name: str | N
     with get_engine().connect() as connection:
         row = connection.execute(text("select id, email, full_name, role, status, plan_code from public.profiles where id = :id"), {"id": user_id}).mappings().one_or_none()
     if row:
-        return UserProfile(**dict(row))
+        data = dict(row)
+        data["id"] = str(data["id"])
+        return UserProfile(**data)
     return load_profile(UUID(user_id), email, full_name)
 
 
