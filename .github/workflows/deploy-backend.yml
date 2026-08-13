@@ -52,6 +52,17 @@ jobs:
           BACKEND_DIR=$APP_DIR/backend
           VENV=$BACKEND_DIR/.venv/bin
           AUTH_KEY="${SUPABASE_PUBLISHABLE_KEY:-${SUPABASE_ANON_KEY:-}}"
+
+          on_error() {
+            rc=$?
+            echo "=== DEPLOY FAILED: service diagnostics ==="
+            sudo -n systemctl status job-auto-apply.service --no-pager || true
+            sudo -n journalctl -u job-auto-apply.service -n 160 --no-pager || true
+            echo "=== END SERVICE DIAGNOSTICS ==="
+            exit "$rc"
+          }
+          trap on_error ERR
+
           test -d "$APP_DIR/.git"
           test -x "$VENV/python"
           test -n "$SUPABASE_DB_URL"
@@ -147,11 +158,8 @@ jobs:
           code=$(curl -sS -o "$TMP/logout" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H 'Authorization: Bearer invalid-token'); expect 401 "$code" "$TMP/logout" invalid-logout-token
           code=$(curl -sS -o "$TMP/reset" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/password-reset -H 'Content-Type: application/json' --data '{"email":"nobody-ci@example.com"}'); expect 202 "$code" "$TMP/reset" password-reset
 
-          # --- Full authenticated flow using a pre-created CI test user ---
-          # Login is used instead of signup to avoid Supabase per-IP signup limits.
           CI_USER="$CI_TEST_USER_EMAIL"
           CI_PASS="$CI_TEST_USER_PASSWORD"
-
           echo "==> Authenticated flow: logging in as $CI_USER"
           code=$(curl -sS -o "$TMP/login" -w '%{http_code}' \
             -X POST http://127.0.0.1:8004/api/v1/auth/login \
