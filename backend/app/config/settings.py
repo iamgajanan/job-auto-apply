@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""
     SUPABASE_PUBLISHABLE_KEY: str = ""
     SUPABASE_ANON_KEY: str = ""
+    # Service-role key — used ONLY server-side for admin operations (creating users
+    # via Supabase Admin API). Never exposed to the frontend or logged.
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
 
     # Razorpay. Secrets stay on the Raspberry Pi runtime and are never sent to the frontend.
     RAZORPAY_KEY_ID: str = ""
