@@ -35,57 +35,42 @@ def _http_error(exc: SupabaseAuthError) -> HTTPException:
 
 
 def load_profile(user_id: UUID, email: str | None, full_name: str | None) -> UserProfile:
+    """Ensure the profile is current and return it in one database round-trip.
+
+    Supabase Auth is the source of truth for credentials and identity. The
+    profile row is application-owned, so every authenticated request keeps the
+    email/name in sync and derives the role from the admin allowlist. The
+    previous implementation performed four separate statements; this single
+    INSERT ... ON CONFLICT statement preserves the same behavior while
+    reducing connection round-trips and avoiding a read-after-write sequence.
+    """
     with get_engine().begin() as connection:
-        connection.execute(
-            text(
-                """
-                insert into public.profiles (id, email, full_name, role, status, plan_code)
-                values (:id, :email, :full_name, 'user', 'active', 'free')
-                on conflict (id) do update
-                set email = coalesce(excluded.email, public.profiles.email),
-                    full_name = coalesce(excluded.full_name, public.profiles.full_name),
-                    updated_at = timezone('utc', now())
-                """
-            ),
-            {"id": str(user_id), "email": email, "full_name": full_name},
-        )
-
-        allowlisted = connection.execute(
-            text(
-                """
-                select exists(
-                    select 1
-                    from public.admin_allowlist
-                    where lower(email) = lower(:email)
-                      and is_active = true
-                )
-                """
-            ),
-            {"email": email or ""},
-        ).scalar_one()
-
-        role = "super_admin" if allowlisted else "user"
-        connection.execute(
-            text(
-                """
-                update public.profiles
-                set role = :role,
-                    updated_at = timezone('utc', now())
-                where id = :id
-                """
-            ),
-            {"role": role, "id": str(user_id)},
-        )
-
         row = connection.execute(
             text(
                 """
-                select id, email, full_name, role, status, plan_code
-                from public.profiles
-                where id = :id
+                insert into public.profiles (id, email, full_name, role, status, plan_code)
+                values (
+                    :id,
+                    :email,
+                    :full_name,
+                    case when exists (
+                        select 1
+                        from public.admin_allowlist
+                        where lower(email) = lower(:email)
+                          and is_active = true
+                    ) then 'super_admin' else 'user' end,
+                    'active',
+                    'free'
+                )
+                on conflict (id) do update
+                set email = coalesce(excluded.email, public.profiles.email),
+                    full_name = coalesce(excluded.full_name, public.profiles.full_name),
+                    role = excluded.role,
+                    updated_at = timezone('utc', now())
+                returning id, email, full_name, role, status, plan_code
                 """
             ),
-            {"id": str(user_id)},
+            {"id": str(user_id), "email": email, "full_name": full_name},
         ).mappings().one()
 
     data = dict(row)
