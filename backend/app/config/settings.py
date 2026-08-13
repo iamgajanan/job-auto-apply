@@ -16,14 +16,8 @@ class Settings(BaseSettings):
     BACKEND_HOST: str
     BACKEND_PORT: int
 
-    # Legacy app JWT settings are kept for compatibility with existing config.
-    # User authentication is handled by Supabase Auth and its access tokens.
-    JWT_SECRET: str = ""
-    JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
-
-    # Supabase Auth. Prefer the new publishable key; legacy anon is supported
-    # during the 2026 API-key migration period.
+    # Supabase Auth. Access tokens are issued and validated by Supabase Auth;
+    # the application does not maintain its own JWT signing secret.
     SUPABASE_URL: str = ""
     SUPABASE_PUBLISHABLE_KEY: str = ""
     SUPABASE_ANON_KEY: str = ""
