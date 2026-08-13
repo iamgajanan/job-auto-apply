@@ -88,7 +88,9 @@ def load_profile(user_id: UUID, email: str | None, full_name: str | None) -> Use
             {"id": str(user_id)},
         ).mappings().one()
 
-    return UserProfile(**dict(row))
+    data = dict(row)
+    data["id"] = str(data["id"])
+    return UserProfile(**data)
 
 
 def get_current_user(
