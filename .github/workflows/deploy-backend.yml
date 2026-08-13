@@ -57,6 +57,9 @@ jobs:
           test -n "$SUPABASE_DB_URL"
           test -n "$SUPABASE_URL"
           test -n "$AUTH_KEY"
+          test -n "$SUPABASE_SERVICE_ROLE_KEY"
+          test -n "$CI_TEST_USER_EMAIL"
+          test -n "$CI_TEST_USER_PASSWORD"
 
           cd "$APP_DIR"
           git fetch --prune origin just-scrapping
@@ -68,7 +71,7 @@ jobs:
           "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
 
           cd "$APP_DIR"
-          SUPABASE_DB_URL="$SUPABASE_DB_URL" SUPABASE_URL="$SUPABASE_URL" SUPABASE_PUBLISHABLE_KEY="$AUTH_KEY" RAZORPAY_KEY_ID="$RAZORPAY_KEY_ID" RAZORPAY_KEY_SECRET="$RAZORPAY_KEY_SECRET" RAZORPAY_WEBHOOK_SECRET="$RAZORPAY_WEBHOOK_SECRET" CORS_ORIGINS="$CORS_ORIGINS" "$VENV/python" - <<'PY'
+          SUPABASE_DB_URL="$SUPABASE_DB_URL" SUPABASE_URL="$SUPABASE_URL" SUPABASE_PUBLISHABLE_KEY="$AUTH_KEY" RAZORPAY_KEY_ID="$RAZORPAY_KEY_ID" RAZORPAY_KEY_SECRET="$RAZORPAY_KEY_SECRET" RAZORPAY_WEBHOOK_SECRET="$RAZORPAY_WEBHOOK_SECRET" CORS_ORIGINS="$CORS_ORIGINS" SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_SERVICE_ROLE_KEY" "$VENV/python" - <<'PY'
           import os
           from pathlib import Path
           p=Path('/home/iamgajanan/Projects/job-auto-apply/.env')
@@ -80,7 +83,7 @@ jobs:
             'RAZORPAY_KEY_ID':os.environ.get('RAZORPAY_KEY_ID',''),
             'RAZORPAY_KEY_SECRET':os.environ.get('RAZORPAY_KEY_SECRET',''),
             'RAZORPAY_WEBHOOK_SECRET':os.environ.get('RAZORPAY_WEBHOOK_SECRET',''),
-            'SUPABASE_SERVICE_ROLE_KEY':os.environ.get('SUPABASE_SERVICE_ROLE_KEY',''),
+            'SUPABASE_SERVICE_ROLE_KEY':os.environ['SUPABASE_SERVICE_ROLE_KEY'],
           }
           if os.environ.get('CORS_ORIGINS'):
             managed['CORS_ORIGINS']=os.environ['CORS_ORIGINS']
@@ -145,38 +148,32 @@ jobs:
           code=$(curl -sS -o "$TMP/reset" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/password-reset -H 'Content-Type: application/json' --data '{"email":"nobody-ci@example.com"}'); expect 202 "$code" "$TMP/reset" password-reset
 
           # --- Full authenticated flow using a pre-created CI test user ---
-          # We login instead of signup to avoid Supabase per-IP signup rate limits.
-          # Create this user once manually (see docs/ci-setup.md) then add
-          # CI_TEST_USER_EMAIL and CI_TEST_USER_PASSWORD as GitHub Actions secrets.
-          CI_USER="${CI_TEST_USER_EMAIL:-}"
-          CI_PASS="${CI_TEST_USER_PASSWORD:-}"
+          # Login is used instead of signup to avoid Supabase per-IP signup limits.
+          CI_USER="$CI_TEST_USER_EMAIL"
+          CI_PASS="$CI_TEST_USER_PASSWORD"
 
-          if [ -z "$CI_USER" ] || [ -z "$CI_PASS" ]; then
-            echo "WARNING: CI_TEST_USER_EMAIL / CI_TEST_USER_PASSWORD secrets not set — skipping authenticated flow"
-            echo "  Add these secrets to enable the full auth smoke test (see docs/ci-setup.md)"
-          else
-            echo "==> Authenticated flow: logging in as $CI_USER"
-            code=$(curl -sS -o "$TMP/login" -w '%{http_code}' \
-              -X POST http://127.0.0.1:8004/api/v1/auth/login \
-              -H 'Content-Type: application/json' \
-              --data "{\"email\":\"$CI_USER\",\"password\":\"$CI_PASS\"}")
-            expect 200 "$code" "$TMP/login" ci-user-login
+          echo "==> Authenticated flow: logging in as $CI_USER"
+          code=$(curl -sS -o "$TMP/login" -w '%{http_code}' \
+            -X POST http://127.0.0.1:8004/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$CI_USER\",\"password\":\"$CI_PASS\"}")
+          expect 200 "$code" "$TMP/login" ci-user-login
 
-            TOKEN=$("$VENV/python" - "$TMP/login" <<'PY'
+          TOKEN=$("$VENV/python" - "$TMP/login" <<'PY'
           import json,sys
           d=json.load(open(sys.argv[1])); print((d.get('session') or {}).get('access_token',''))
           PY
-            )
-            [ -n "$TOKEN" ] || { echo "ERROR: login succeeded but no token returned"; cat "$TMP/login"; exit 1; }
-            echo "Login: PASS — token obtained"
+          )
+          [ -n "$TOKEN" ] || { echo "ERROR: login succeeded but no token returned"; cat "$TMP/login"; exit 1; }
+          echo "Login: PASS — token obtained"
 
-            code=$(curl -sS -o "$TMP/me" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
-            expect 200 "$code" "$TMP/me" authenticated-me
-            echo "GET /auth/me: PASS"
+          code=$(curl -sS -o "$TMP/me" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
+          expect 200 "$code" "$TMP/me" authenticated-me
+          echo "GET /auth/me: PASS"
 
-            code=$(curl -sS -o "$TMP/account" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/account/me)
-            expect 200 "$code" "$TMP/account" authenticated-account
-            "$VENV/python" - "$TMP/account" <<'PY'
+          code=$(curl -sS -o "$TMP/account" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/account/me)
+          expect 200 "$code" "$TMP/account" authenticated-account
+          "$VENV/python" - "$TMP/account" <<'PY'
           import json,sys
           d=json.load(open(sys.argv[1]))
           assert 'usage' in d, f"missing usage field: {d}"
@@ -186,18 +183,17 @@ jobs:
           print(f"GET /account/me: PASS (plan={u['plan_code']}, granted={u['granted_searches']}, remaining={u['remaining_searches']})")
           PY
 
-            code=$(curl -sS -o "$TMP/admin" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/admin/users)
-            expect 403 "$code" "$TMP/admin" regular-user-admin-rejection
-            echo "Admin endpoint rejects regular user: PASS"
+          code=$(curl -sS -o "$TMP/admin" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/admin/users)
+          expect 403 "$code" "$TMP/admin" regular-user-admin-rejection
+          echo "Admin endpoint rejects regular user: PASS"
 
-            code=$(curl -sS -o "$TMP/out" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $TOKEN")
-            expect 204 "$code" "$TMP/out" logout
-            echo "Logout: PASS"
+          code=$(curl -sS -o "$TMP/out" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $TOKEN")
+          expect 204 "$code" "$TMP/out" logout
+          echo "Logout: PASS"
 
-            code=$(curl -sS -o "$TMP/after" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
-            expect 401 "$code" "$TMP/after" post-logout-token-rejected
-            echo "Token rejected after logout: PASS"
+          code=$(curl -sS -o "$TMP/after" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
+          expect 401 "$code" "$TMP/after" post-logout-token-rejected
+          echo "Token rejected after logout: PASS"
 
-            echo "FULL AUTHENTICATED FLOW: PASS"
-          fi
+          echo "FULL AUTHENTICATED FLOW: PASS"
           echo 'POST-DEPLOY API SMOKE CHECKS: PASS'
