@@ -160,7 +160,7 @@ jobs:
 
           CI_USER="$CI_TEST_USER_EMAIL"
           CI_PASS="$CI_TEST_USER_PASSWORD"
-          echo "==> Authenticated flow: logging in as $CI_USER"
+          echo "==> Local authenticated flow: logging in as $CI_USER"
           code=$(curl -sS --max-time 30 -o "$TMP/login" -w '%{http_code}' \
             -X POST http://127.0.0.1:8004/api/v1/auth/login \
             -H 'Content-Type: application/json' \
@@ -173,11 +173,11 @@ jobs:
           PY
           )
           [ -n "$TOKEN" ] || { echo "ERROR: login succeeded but no token returned"; cat "$TMP/login"; exit 1; }
-          echo "Login: PASS — token obtained"
+          echo "Local login: PASS — token obtained"
 
           code=$(curl -sS --max-time 30 -o "$TMP/me" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
           expect 200 "$code" "$TMP/me" authenticated-me
-          echo "GET /auth/me: PASS"
+          echo "Local GET /auth/me: PASS"
 
           code=$(curl -sS --max-time 30 -o "$TMP/account" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/account/me)
           expect 200 "$code" "$TMP/account" authenticated-account
@@ -188,20 +188,52 @@ jobs:
           u=d['usage']
           assert u.get('plan_code'), f"missing plan_code: {u}"
           assert u.get('granted_searches',0) > 0, f"expected granted_searches > 0: {u}"
-          print(f"GET /account/me: PASS (plan={u['plan_code']}, granted={u['granted_searches']}, remaining={u['remaining_searches']})")
+          print(f"Local /account/me: PASS (plan={u['plan_code']}, granted={u['granted_searches']}, remaining={u['remaining_searches']})")
           PY
 
           code=$(curl -sS --max-time 30 -o "$TMP/admin" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/admin/users)
           expect 403 "$code" "$TMP/admin" regular-user-admin-rejection
-          echo "Admin endpoint rejects regular user: PASS"
+          echo "Local admin endpoint rejects regular user: PASS"
+
+          echo "==> Public authenticated flow through Cloudflare"
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-login" -w '%{http_code}' \
+            -X POST https://jobs.n8npi.live/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$CI_USER\",\"password\":\"$CI_PASS\"}")
+          expect 200 "$code" "$TMP/public-login" public-ci-user-login
+
+          PUBLIC_TOKEN=$("$VENV/python" - "$TMP/public-login" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); print((d.get('session') or {}).get('access_token',''))
+          PY
+          )
+          [ -n "$PUBLIC_TOKEN" ] || { echo "ERROR: public login succeeded but no token returned"; cat "$TMP/public-login"; exit 1; }
+          echo "Public login: PASS — token obtained"
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-me" -w '%{http_code}' -H "Authorization: Bearer $PUBLIC_TOKEN" https://jobs.n8npi.live/api/v1/auth/me)
+          expect 200 "$code" "$TMP/public-me" public-authenticated-me
+          echo "Public GET /auth/me: PASS"
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-account" -w '%{http_code}' -H "Authorization: Bearer $PUBLIC_TOKEN" https://jobs.n8npi.live/api/v1/account/me)
+          expect 200 "$code" "$TMP/public-account" public-authenticated-account
+          echo "Public GET /account/me: PASS"
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-out" -w '%{http_code}' -X POST https://jobs.n8npi.live/api/v1/auth/logout -H "Authorization: Bearer $PUBLIC_TOKEN")
+          expect 204 "$code" "$TMP/public-out" public-logout
+          echo "Public logout: PASS"
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-after" -w '%{http_code}' -H "Authorization: Bearer $PUBLIC_TOKEN" https://jobs.n8npi.live/api/v1/auth/me)
+          expect 401 "$code" "$TMP/public-after" public-post-logout-token-rejected
+          echo "Public token rejected after logout: PASS"
 
           code=$(curl -sS --max-time 30 -o "$TMP/out" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $TOKEN")
           expect 204 "$code" "$TMP/out" logout
-          echo "Logout: PASS"
+          echo "Local logout: PASS"
 
           code=$(curl -sS --max-time 30 -o "$TMP/after" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me)
           expect 401 "$code" "$TMP/after" post-logout-token-rejected
-          echo "Token rejected after logout: PASS"
+          echo "Local token rejected after logout: PASS"
 
           echo "FULL AUTHENTICATED FLOW: PASS"
+          echo "PUBLIC AUTHENTICATED FLOW: PASS"
           echo 'POST-DEPLOY API SMOKE CHECKS: PASS'
