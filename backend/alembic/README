@@ -1,1 +1,6 @@
-Generic single-database configuration.
+Alembic is retired for this project.
+
+Database schema changes are managed exclusively by Supabase CLI migrations in
+`supabase/migrations/` and applied by GitHub Actions with `supabase db push`.
+
+Do not create or run Alembic migrations for this application.
