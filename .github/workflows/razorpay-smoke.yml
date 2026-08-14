@@ -99,4 +99,213 @@ jobs:
             --data "$body")
           [ "$code" = 400 ] || { echo "Expected HTTP 400 for invalid webhook signature, got $code"; cat /tmp/webhook-response; exit 1; }
           echo 'Webhook signature rejection: PASS'
-          echo 'RAZORPAY BACKEND SMOKE TEST: PASS'
+
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/tmp/razorpay-e2e-package.json
+          cd /tmp
+          npm install --no-save playwright@latest
+          npx playwright install --with-deps chromium
+
+      - name: Run real Razorpay Test Checkout
+        shell: bash
+        env:
+          CI_TOKEN: ${{ secrets.CI_TEST_ACCESS_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/razorpay-e2e
+          cat >/tmp/razorpay-e2e/test.js <<'NODE'
+          const fs = require('fs');
+          const { chromium } = require('/tmp/node_modules/playwright');
+
+          const baseUrl = process.env.BASE_URL;
+          const email = process.env.CI_TEST_USER_EMAIL;
+          const password = process.env.CI_TEST_USER_PASSWORD;
+
+          async function api(path, options = {}) {
+            const response = await fetch(`${baseUrl}${path}`, options);
+            const text = await response.text();
+            let data;
+            try { data = JSON.parse(text); } catch { data = { raw: text }; }
+            if (!response.ok) throw new Error(`${path}: HTTP ${response.status} ${text}`);
+            return data;
+          }
+
+          (async () => {
+            const login = await api('/api/v1/auth/login', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({email, password}),
+            });
+            const token = login?.session?.access_token;
+            if (!token) throw new Error('No access token returned');
+
+            const order = await api('/api/v1/payments/orders', {
+              method: 'POST',
+              headers: {'content-type': 'application/json', authorization: `Bearer ${token}`},
+              body: JSON.stringify({plan_code: 'starter'}),
+            });
+            if (order.amount_inr_paise !== 29900) throw new Error(`Unexpected amount: ${order.amount_inr_paise}`);
+
+            const html = `<!doctype html><html><body>
+              <button id="pay">Pay with Razorpay</button>
+              <pre id="result"></pre>
+              <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+              <script>
+                const options = {
+                  key: ${JSON.stringify(order.razorpay_key_id)},
+                  amount: ${order.amount_inr_paise},
+                  currency: 'INR',
+                  name: 'Job Finder Test',
+                  description: 'Automated Test Payment',
+                  order_id: ${JSON.stringify(order.order_id)},
+                  prefill: {name: 'CI Test User', email: ${JSON.stringify(email)}, contact: '+919999999999'},
+                  handler: function (response) {
+                    window.paymentResult = response;
+                    document.getElementById('result').textContent = JSON.stringify(response);
+                  },
+                  modal: {ondismiss: function () { window.paymentDismissed = true; }}
+                };
+                const rzp = new Razorpay(options);
+                document.getElementById('pay').onclick = function(e) { e.preventDefault(); rzp.open(); };
+              </script>
+            </body></html>`;
+            fs.writeFileSync('/tmp/razorpay-e2e/index.html', html);
+
+            const browser = await chromium.launch({headless: true});
+            const page = await browser.newPage({viewport: {width: 1280, height: 900}});
+            page.on('console', msg => console.log('browser:', msg.text()));
+            page.on('pageerror', err => console.log('pageerror:', err.message));
+            await page.goto('http://127.0.0.1:4173/index.html');
+            await page.getByRole('button', {name: 'Pay with Razorpay'}).click();
+
+            await page.waitForTimeout(3000);
+            console.log('Checkout frames:', page.frames().map(f => f.url()).join('\n'));
+
+            const allFrames = () => page.frames().filter(f => f.url().includes('razorpay') || f === page.mainFrame());
+            let cardFrame = null;
+            for (let i = 0; i < 30 && !cardFrame; i++) {
+              for (const frame of allFrames()) {
+                try {
+                  if (await frame.getByText('Card', {exact: true}).count()) { cardFrame = frame; break; }
+                } catch {}
+              }
+              if (!cardFrame) await page.waitForTimeout(500);
+            }
+            if (!cardFrame) throw new Error('Razorpay Card payment method was not found');
+            await cardFrame.getByText('Card', {exact: true}).first().click();
+
+            const findInput = async (patterns) => {
+              for (const frame of allFrames()) {
+                for (const pattern of patterns) {
+                  const locator = frame.locator(pattern).first();
+                  try { if (await locator.count() && await locator.isVisible()) return locator; } catch {}
+                }
+              }
+              return null;
+            };
+
+            const cardNumber = await findInput([
+              'input[autocomplete="cc-number"]',
+              'input[name*="card" i][name*="number" i]',
+              'input[placeholder*="Card Number" i]',
+            ]);
+            const expiry = await findInput([
+              'input[autocomplete="cc-exp"]',
+              'input[name*="expiry" i]',
+              'input[placeholder*="MM" i][placeholder*="YY" i]',
+            ]);
+            const cvv = await findInput([
+              'input[autocomplete="cc-csc"]',
+              'input[name*="cvv" i]',
+              'input[placeholder*="CVV" i]',
+            ]);
+            if (!cardNumber || !expiry || !cvv) {
+              await page.screenshot({path: '/tmp/razorpay-e2e/checkout.png', fullPage: true});
+              throw new Error('Could not locate Razorpay card inputs');
+            }
+
+            await cardNumber.fill('4111111111111111');
+            await expiry.fill('12/30');
+            await cvv.fill('123');
+
+            const payButton = await findInput([]);
+            const payCandidates = [];
+            for (const frame of allFrames()) {
+              for (const text of ['Pay', 'Pay ₹299', 'Pay Now']) {
+                try {
+                  const loc = frame.getByRole('button', {name: new RegExp(text.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&'), 'i')}).first();
+                  if (await loc.count() && await loc.isVisible()) payCandidates.push(loc);
+                } catch {}
+              }
+            }
+            if (!payCandidates.length) {
+              await page.screenshot({path: '/tmp/razorpay-e2e/checkout-before-pay.png', fullPage: true});
+              throw new Error('Razorpay Pay button not found');
+            }
+            await payCandidates[0].click();
+
+            for (let i = 0; i < 30; i++) {
+              const success = page.getByText('Success', {exact: true}).first();
+              if (await success.count() && await success.isVisible()) { await success.click(); break; }
+              for (const frame of page.frames()) {
+                try {
+                  const s = frame.getByText('Success', {exact: true}).first();
+                  if (await s.count() && await s.isVisible()) { await s.click(); break; }
+                } catch {}
+              }
+              await page.waitForTimeout(500);
+            }
+
+            await page.waitForFunction(() => !!window.paymentResult, null, {timeout: 30000});
+            const result = await page.evaluate(() => window.paymentResult);
+            console.log('Checkout payment result received:', JSON.stringify(result));
+            if (!result?.razorpay_payment_id || !result?.razorpay_order_id || !result?.razorpay_signature) {
+              throw new Error(`Incomplete Razorpay handler result: ${JSON.stringify(result)}`);
+            }
+
+            const verify = await api('/api/v1/payments/verify', {
+              method: 'POST',
+              headers: {'content-type': 'application/json', authorization: `Bearer ${token}`},
+              body: JSON.stringify({
+                razorpay_order_id: result.razorpay_order_id,
+                razorpay_payment_id: result.razorpay_payment_id,
+                razorpay_signature: result.razorpay_signature,
+              }),
+            });
+            if (verify.status !== 'captured') throw new Error(`Verify did not capture payment: ${JSON.stringify(verify)}`);
+            console.log('Payment signature verification: PASS');
+
+            let history;
+            for (let i = 0; i < 30; i++) {
+              history = await api('/api/v1/payments/history', {headers: {authorization: `Bearer ${token}`}});
+              const row = history.payments.find(p => p.provider_order_id === order.order_id);
+              if (row?.status === 'captured' && row.provider_payment_id === result.razorpay_payment_id) break;
+              await new Promise(r => setTimeout(r, 1000));
+            }
+            const row = history.payments.find(p => p.provider_order_id === order.order_id);
+            if (!row || row.status !== 'captured') throw new Error(`Payment history was not captured: ${JSON.stringify(row)}`);
+            console.log('Payment history captured: PASS');
+
+            await browser.close();
+            console.log('RAZORPAY CHECKOUT E2E: PASS');
+          })().catch(async err => {
+            console.error(err.stack || err);
+            process.exit(1);
+          });
+          NODE
+
+          python3 -m http.server 4173 --directory /tmp/razorpay-e2e >/tmp/razorpay-e2e-http.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID || true' EXIT
+          node /tmp/razorpay-e2e/test.js
+
+      - name: Upload Razorpay Checkout diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: razorpay-checkout-diagnostics
+          path: /tmp/razorpay-e2e/
+          if-no-files-found: ignore
