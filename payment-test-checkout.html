@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Razorpay E2E Test</title></head><body>
+<button id="pay">Pay</button><pre id="status"></pre>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+const q=new URLSearchParams(location.search);
+const opts={key:q.get('key'),amount:Number(q.get('amount')),currency:q.get('currency')||'INR',name:'Job Finder Test',description:'Automated Test Payment',order_id:q.get('order_id'),prefill:{name:'CI Test User',email:q.get('email')||'',contact:'+919999999999'},handler:r=>{window.paymentResult=r;document.getElementById('status').textContent='PAYMENT_RESULT';},modal:{ondismiss:()=>window.paymentDismissed=true}};
+const rzp=new Razorpay(opts);
+document.getElementById('pay').onclick=()=>rzp.open();
+</script></body></html>
