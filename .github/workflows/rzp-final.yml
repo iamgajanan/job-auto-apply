@@ -1,0 +1,44 @@
+name: RZP Final Checkout
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - just-scrapping
+    paths:
+      - .github/workflows/rzp-final.yml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASE_URL: https://jobs.n8npi.live
+      EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
+      PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
+    steps:
+      - name: Health
+        run: curl -fsS --http1.1 "$BASE_URL/api/v1/health/database"
+      - name: Install tools
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@latest
+          npx playwright install --with-deps chromium
+      - name: Checkout
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          base=os.environ['BASE_URL']; data=json.dumps({'email':os.environ['EMAIL'],'password':os.environ['PASSWORD']}).encode()
+          req=urllib.request.Request(base+'/api/v1/auth/login',data=data,headers={'content-type':'application/json'},method='POST')
+          token=json.load(urllib.request.urlopen(req))['session']['access_token']
+          req=urllib.request.Request(base+'/api/v1/payments/orders',data=json.dumps({'plan_code':'starter'}).encode(),headers={'content-type':'application/json','authorization':'Bearer '+token},method='POST')
+          order=json.load(urllib.request.urlopen(req))
+          open('/tmp/order.json','w').write(json.dumps({'order':order,'token':token}))
+          PY
+          cat >/tmp/test.js <<'NODE'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const x=JSON.parse(fs.readFileSync('/tmp/order.json'));const o=x.order;
+          fs.writeFileSync('/tmp/index.html',`<!doctype html><button id="pay">Pay</button><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const q={key:${JSON.stringify(o.razorpay_key_id)},amount:${o.amount_inr_paise},currency:'INR',order_id:${JSON.stringify(o.order_id)},name:'Job Finder Test',prefill:{name:'CI Test User',email:${JSON.stringify(process.env.EMAIL)},contact:'+919999999999'},handler:r=>window.paymentResult=r};const z=new Razorpay(q);pay.onclick=()=>z.open();</script>`);
+          const cp=require('child_process');cp.execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout','/tmp/key.pem','-out','/tmp/cert.pem','-days','1','-subj','/CN=localhost']);cp.spawn('python3',['-m','http.server','4173'],{cwd:'/tmp',stdio:'ignore'});
+          (async()=>{const b=await chromium.launch({headless:true});const p=await b.newPage({ignoreHTTPSErrors:true});await p.goto('https://127.0.0.1:4173/index.html');await p.getByRole('button',{name:'Pay'}).click();for(let i=0;i<120;i++){for(const f of p.frames()){try{const c=f.locator('input[type="tel"],input[placeholder*="mobile" i]').first();if(await c.count()&&await c.isVisible()){await c.fill('9999999999');const n=f.getByText('Continue',{exact:true}).last();if(await n.count()&&await n.isVisible())await n.click({force:true})}}catch{}}const cards=p.locator('[data-testid="Cards"]').first();if(await cards.count()&&await cards.isVisible()){await cards.click({force:true});break}await p.waitForTimeout(500)}const card=p.locator('input[autocomplete="cc-number"]').first();await card.waitFor({state:'visible',timeout:30000});await card.fill('410028000001007');await p.locator('input[autocomplete="cc-exp"]').fill('12/30');await p.locator('input[autocomplete="cc-csc"]').fill('123');await p.getByRole('button',{name:/pay/i}).last().click({force:true});for(let i=0;i<120;i++){for(const f of p.frames()){try{const otp=f.locator('input[placeholder*="OTP" i],input[name*="otp" i]').first();if(await otp.count()&&await otp.isVisible()){await otp.fill('1234');const s=f.getByRole('button',{name:/submit|verify|pay/i}).last();if(await s.count()&&await s.isVisible())await s.click({force:true})}}catch{}}if(await p.evaluate(()=>window.paymentResult?.razorpay_payment_id))break;await p.waitForTimeout(500)}const r=await p.evaluate(()=>window.paymentResult);if(!r?.razorpay_payment_id)throw Error('No Razorpay payment result: '+JSON.stringify(r));console.log('CHECKOUT PASS',r.razorpay_payment_id);await b.close()})().catch(e=>{console.error(e);process.exit(1)});
+          NODE
+          node /tmp/test.js
