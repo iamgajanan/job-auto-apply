@@ -10,20 +10,35 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       BASE_URL: https://jobs.n8npi.live
       EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
       PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
     steps:
-      - name: Health
-        run: curl -fsS --http1.1 "$BASE_URL/api/v1/health/database"
+      - name: Health check
+        run: |
+          for i in $(seq 1 20); do
+            code=$(curl -sS --http1.1 --max-time 10 -o /tmp/health -w '%{http_code}' "$BASE_URL/api/v1/health/database" || true)
+            if [ "$code" = "200" ]; then cat /tmp/health; echo; exit 0; fi
+            echo "Health attempt $i: HTTP $code, retrying..."
+            sleep 3
+          done
+          echo "Backend health check failed"
+          exit 1
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Install Playwright
+      - name: Install Node.js dependencies
         run: |
           npm init -y >/dev/null 2>&1
           npm install --no-save playwright@latest
           npx playwright install --with-deps chromium
-      - name: Run Razorpay E2E
+      - name: Run Razorpay Final E2E
         run: node razorpay-e2e-runner.js
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rzp-final-diagnostics
+          path: /tmp/rzp-*.png
+          if-no-files-found: ignore
