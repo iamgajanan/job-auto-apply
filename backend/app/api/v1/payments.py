@@ -65,16 +65,19 @@ def payment_history(
                     pay.currency,
                     pay.status,
                     coalesce(
-                        sum(ref.amount_inr_paise) filter (where ref.status = 'processed'),
+                        (
+                            select sum(ref.amount_inr_paise)
+                            from public.payment_refunds ref
+                            where ref.payment_id = pay.id
+                              and ref.status = 'processed'
+                        ),
                         0
                     )::bigint as refunded_inr_paise,
                     pay.paid_at,
                     pay.created_at
                 from public.payments pay
                 left join public.plans plan on plan.code = pay.plan_code
-                left join public.payment_refunds ref on ref.payment_id = pay.id
                 where pay.user_id = :user_id
-                group by pay.id, plan.name
                 order by pay.created_at desc
                 limit :limit
                 """
