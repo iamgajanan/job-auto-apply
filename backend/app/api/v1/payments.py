@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -15,6 +15,7 @@ from app.db.connection import get_engine
 from app.features.payments.schemas import (
     CreateOrderRequest,
     CreateOrderResponse,
+    PaymentHistoryResponse,
     PaymentResult,
     VerifyPaymentRequest,
 )
@@ -44,6 +45,45 @@ def verify_payment(
     )
 
 
+@router.get("/history", response_model=PaymentHistoryResponse)
+def payment_history(
+    current_user: CurrentUser = Depends(get_current_user),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    with get_engine().connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                select
+                    pay.id,
+                    pay.plan_code,
+                    coalesce(plan.name, pay.plan_code) as plan_name,
+                    pay.provider,
+                    pay.provider_order_id,
+                    pay.provider_payment_id,
+                    pay.amount_inr_paise,
+                    pay.currency,
+                    pay.status,
+                    coalesce(
+                        sum(ref.amount_inr_paise) filter (where ref.status = 'processed'),
+                        0
+                    )::bigint as refunded_inr_paise,
+                    pay.paid_at,
+                    pay.created_at
+                from public.payments pay
+                left join public.plans plan on plan.code = pay.plan_code
+                left join public.payment_refunds ref on ref.payment_id = pay.id
+                where pay.user_id = :user_id
+                group by pay.id, plan.name
+                order by pay.created_at desc
+                limit :limit
+                """
+            ),
+            {"user_id": current_user.id, "limit": limit},
+        ).mappings().all()
+    return {"payments": [dict(row) for row in rows]}
+
+
 @router.post("/webhook")
 async def razorpay_webhook(
     http_request: Request,
@@ -71,29 +111,59 @@ async def razorpay_webhook(
     event_type = payload.get("event", "")
     provider_event_id = payload.get("id") or payload.get("event_id") or ""
 
-    if event_type not in ("payment.captured", "payment.failed"):
+    supported_events = {
+        "payment.captured",
+        "payment.failed",
+        "refund.created",
+        "refund.processed",
+        "refund.failed",
+    }
+    if event_type not in supported_events:
         return {"received": True, "processed": False, "reason": "unhandled_event"}
 
-    entity = ((payload.get("payload") or {}).get("payment") or {}).get("entity") or {}
-    order_id = entity.get("order_id")
-    payment_id = entity.get("id")
-    if not order_id or not payment_id:
-        raise HTTPException(status_code=400, detail="Webhook is missing payment identifiers")
+    payment_entity = ((payload.get("payload") or {}).get("payment") or {}).get("entity") or {}
+    refund_entity = ((payload.get("payload") or {}).get("refund") or {}).get("entity") or {}
 
-    with get_engine().connect() as connection:
-        row = connection.execute(
-            text(
-                """
-                select id, user_id, status
-                from public.payments
-                where provider = 'razorpay' and provider_order_id = :order_id
-                """
-            ),
-            {"order_id": order_id},
-        ).mappings().one_or_none()
+    if event_type.startswith("payment."):
+        order_id = payment_entity.get("order_id")
+        payment_id = payment_entity.get("id")
+        if not order_id or not payment_id:
+            raise HTTPException(status_code=400, detail="Webhook is missing payment identifiers")
 
-    if not row:
-        return {"received": True, "processed": False, "reason": "unknown_order"}
+        with get_engine().connect() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    select id, user_id, status, amount_inr_paise
+                    from public.payments
+                    where provider = 'razorpay' and provider_order_id = :order_id
+                    """
+                ),
+                {"order_id": order_id},
+            ).mappings().one_or_none()
+
+        if not row:
+            return {"received": True, "processed": False, "reason": "unknown_order"}
+    else:
+        payment_id = refund_entity.get("payment_id")
+        refund_id = refund_entity.get("id")
+        if not payment_id or not refund_id:
+            raise HTTPException(status_code=400, detail="Refund webhook is missing payment/refund identifiers")
+
+        with get_engine().connect() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    select id, user_id, status, amount_inr_paise
+                    from public.payments
+                    where provider = 'razorpay' and provider_payment_id = :payment_id
+                    """
+                ),
+                {"payment_id": payment_id},
+            ).mappings().one_or_none()
+
+        if not row:
+            return {"received": True, "processed": False, "reason": "unknown_payment"}
 
     event_id = provider_event_id or f"razorpay_{event_type}_{payment_id}"
 
@@ -141,7 +211,81 @@ async def razorpay_webhook(
                     ),
                     {"payment_id": payment_id, "id": str(row["id"])},
                 )
-            return {"received": True, "processed": True, "event": "payment.failed"}
+            return {"received": True, "processed": True, "event": event_type}
+
+        if event_type in ("refund.created", "refund.processed", "refund.failed"):
+            refund_status = event_type.removeprefix("refund.")
+            refund_id = refund_entity["id"]
+            refund_amount = int(refund_entity.get("amount", 0))
+            if refund_amount <= 0:
+                raise HTTPException(status_code=400, detail="Refund amount must be greater than zero")
+
+            with get_engine().begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        insert into public.payment_refunds (
+                            payment_id,
+                            provider,
+                            provider_refund_id,
+                            amount_inr_paise,
+                            currency,
+                            status,
+                            raw_payload
+                        ) values (
+                            :payment_id,
+                            'razorpay',
+                            :refund_id,
+                            :amount,
+                            :currency,
+                            :status,
+                            cast(:raw as jsonb)
+                        )
+                        on conflict (provider, provider_refund_id) do update
+                        set amount_inr_paise = excluded.amount_inr_paise,
+                            currency = excluded.currency,
+                            status = excluded.status,
+                            raw_payload = excluded.raw_payload,
+                            updated_at = timezone('utc', now())
+                        """
+                    ),
+                    {
+                        "payment_id": str(row["id"]),
+                        "refund_id": refund_id,
+                        "amount": refund_amount,
+                        "currency": refund_entity.get("currency") or "INR",
+                        "status": refund_status,
+                        "raw": json.dumps(payload),
+                    },
+                )
+
+                if refund_status == "processed":
+                    refunded = connection.execute(
+                        text(
+                            """
+                            select coalesce(sum(amount_inr_paise), 0)::bigint
+                            from public.payment_refunds
+                            where payment_id = :payment_id
+                              and status = 'processed'
+                            """
+                        ),
+                        {"payment_id": str(row["id"])},
+                    ).scalar_one()
+                    original_amount = int(row["amount_inr_paise"])
+                    new_status = "refunded" if refunded >= original_amount else "partially_refunded"
+                    connection.execute(
+                        text(
+                            """
+                            update public.payments
+                            set status = :status,
+                                updated_at = timezone('utc', now())
+                            where id = :id
+                            """
+                        ),
+                        {"status": new_status, "id": str(row["id"])},
+                    )
+
+            return {"received": True, "processed": True, "event": event_type}
 
         result = payment_service.finalize_payment(
             str(row["user_id"]),
@@ -151,8 +295,6 @@ async def razorpay_webhook(
         )
         return {"received": True, "processed": True, "event": "payment.captured", "result": result}
     except Exception:
-        # The event is only a deduplication marker. If processing failed, remove
-        # the marker so Razorpay's retry can process the event again.
         with get_engine().begin() as connection:
             connection.execute(
                 text(
