@@ -19,8 +19,8 @@ def admin_payment_history(
             text(
                 """
                 select
-                    pay.id,
-                    pay.user_id,
+                    pay.id::text as id,
+                    pay.user_id::text as user_id,
                     profile.email as user_email,
                     pay.plan_code,
                     coalesce(plan.name, pay.plan_code) as plan_name,
@@ -31,12 +31,7 @@ def admin_payment_history(
                     pay.currency,
                     pay.status,
                     coalesce(
-                        (
-                            select sum(ref.amount_inr_paise)
-                            from public.payment_refunds ref
-                            where ref.payment_id = pay.id
-                              and ref.status = 'processed'
-                        ),
+                        sum(ref.amount_inr_paise) filter (where ref.status = 'processed'),
                         0
                     )::bigint as refunded_inr_paise,
                     pay.paid_at,
@@ -44,6 +39,8 @@ def admin_payment_history(
                 from public.payments pay
                 left join public.profiles profile on profile.id = pay.user_id
                 left join public.plans plan on plan.code = pay.plan_code
+                left join public.payment_refunds ref on ref.payment_id = pay.id
+                group by pay.id, profile.email, plan.name
                 order by pay.created_at desc
                 limit :limit
                 """
