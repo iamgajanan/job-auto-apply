@@ -67,18 +67,22 @@ jobs:
           const fs=require('fs'); const {chromium}=require('/tmp/node_modules/playwright');
           const base=process.env.BASE_URL,email=process.env.CI_TEST_USER_EMAIL,password=process.env.CI_TEST_USER_PASSWORD;
           async function api(path,opt={}){const r=await fetch(base+path,opt),t=await r.text();let d;try{d=JSON.parse(t)}catch{d={raw:t}}if(!r.ok)throw Error(`${path}: HTTP ${r.status} ${t}`);return d}
-          const allFrames=page=>page.frames().filter(f=>f.url().includes('razorpay')||f===page.mainFrame());
+          const allFrames=page=>page.frames();
           async function visible(page, selectors){for(const f of allFrames(page))for(const s of selectors){try{const x=f.locator(s).first();if(await x.count()&&await x.isVisible())return x}catch{}}return null}
           (async()=>{
             const l=await api('/api/v1/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,password})});
             const token=l.session.access_token;
             const order=await api('/api/v1/payments/orders',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({plan_code:'starter'})});
             fs.writeFileSync('/tmp/rzp/index.html',`<!doctype html><button id="pay">Pay</button><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const o={key:${JSON.stringify(order.razorpay_key_id)},amount:${order.amount_inr_paise},currency:'INR',name:'Job Finder Test',description:'Test',order_id:${JSON.stringify(order.order_id)},prefill:{name:'CI Test User',email:${JSON.stringify(email)},contact:'+919999999999'},handler:r=>window.paymentResult=r};const rzp=new Razorpay(o);document.getElementById('pay').onclick=()=>rzp.open();</script>`);
-            const b=await chromium.launch({headless:true}); const p=await b.newPage({viewport:{width:1280,height:900}});
+            const b=await chromium.launch({headless:false,args:['--disable-blink-features=AutomationControlled']}); const p=await b.newPage({viewport:{width:1280,height:900}});
             p.on('console',m=>console.log('browser:',m.text())); p.on('pageerror',e=>console.log('pageerror:',e.message));
             await p.goto('http://127.0.0.1:4173/index.html'); await p.getByRole('button',{name:'Pay'}).click();
-            const contact=await visible(p,['input[placeholder="Mobile number"]']);
-            if(!contact){await p.screenshot({path:'/tmp/rzp/contact.png',fullPage:true});throw Error('Razorpay contact mobile field not found')}
+            let contact=null;
+            for(let i=0;i<60&&!contact;i++){
+              contact=await visible(p,['input[placeholder="Mobile number"]','input[placeholder*="mobile" i]','input[type="tel"]']);
+              if(!contact) await p.waitForTimeout(500);
+            }
+            if(!contact){console.log('FRAME URLS:',p.frames().map(f=>f.url()).join('\n'));await p.screenshot({path:'/tmp/rzp/contact.png',fullPage:true});throw Error('Razorpay contact mobile field not found after 30s')}
             await contact.fill('9999999999');
             const cont=await visible(p,['button:has-text("Continue")','button:has-text("continue")']);
             if(!cont)throw Error('Razorpay contact Continue button not found'); await cont.click();
@@ -116,7 +120,7 @@ jobs:
           cd /tmp/rzp
           python3 -m http.server 4173 >/tmp/rzp-server.log 2>&1 &
           SERVER_PID=$!; trap 'kill $SERVER_PID || true' EXIT
-          node /tmp/rzp/test.js
+          xvfb-run -a node /tmp/rzp/test.js
 
       - name: Upload diagnostics
         if: failure()
