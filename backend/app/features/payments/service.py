@@ -254,6 +254,47 @@ class PaymentService:
                 {"plan_code": plan["code"], "user_id": user_id},
             )
 
+            connection.execute(
+                text(
+                    """
+                    update public.subscriptions
+                    set status = 'cancelled',
+                        cancelled_at = timezone('utc', now()),
+                        updated_at = timezone('utc', now())
+                    where user_id = :user_id
+                      and status in ('pending', 'active', 'past_due')
+                    """
+                ),
+                {"user_id": user_id},
+            )
+
+            connection.execute(
+                text(
+                    """
+                    insert into public.subscriptions (
+                        user_id,
+                        plan_code,
+                        status,
+                        provider,
+                        started_at,
+                        metadata
+                    ) values (
+                        :user_id,
+                        :plan_code,
+                        'active',
+                        'razorpay',
+                        timezone('utc', now()),
+                        cast(:metadata as jsonb)
+                    )
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "plan_code": plan["code"],
+                    "metadata": json.dumps({"payment_id": payment_id, "order_id": order_id}),
+                },
+            )
+
             remaining = connection.execute(
                 text(
                     """
