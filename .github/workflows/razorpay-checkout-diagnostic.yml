@@ -1,0 +1,50 @@
+name: Razorpay Checkout Diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [just-scrapping]
+    paths:
+      - ".github/workflows/razorpay-checkout-diagnostic.yml"
+
+jobs:
+  checkout:
+    runs-on: ubuntu-latest
+    env:
+      BASE_URL: https://jobs.n8npi.live
+      CI_TEST_USER_EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
+      CI_TEST_USER_PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
+    steps:
+      - name: Install Playwright
+        run: |
+          cd /tmp && npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@latest
+          npx playwright install --with-deps chromium
+      - name: Checkout
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/rzp
+          cat >/tmp/rzp/test.js <<'NODE'
+          const fs=require('fs');const{chromium}=require('/tmp/node_modules/playwright');
+          const base=process.env.BASE_URL,email=process.env.CI_TEST_USER_EMAIL,password=process.env.CI_TEST_USER_PASSWORD;
+          async function api(path,opt={}){const r=await fetch(base+path,opt),t=await r.text();if(!r.ok)throw Error(`${path}: ${r.status} ${t}`);return JSON.parse(t)}
+          (async()=>{const l=await api('/api/v1/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,password})});const token=l.session.access_token;const o=await api('/api/v1/payments/orders',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({plan_code:'starter'})});
+          fs.writeFileSync('/tmp/rzp/index.html',`<button id="pay">Pay</button><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const r=new Razorpay({key:${JSON.stringify(o.razorpay_key_id)},amount:${o.amount_inr_paise},currency:'INR',name:'Job Finder Test',order_id:${JSON.stringify(o.order_id)},prefill:{name:'CI Test',email:${JSON.stringify(email)},contact:'+919999999999'},handler:x=>window.result=x});document.getElementById('pay').onclick=()=>r.open()</script>`);
+          const b=await chromium.launch({headless:true});const p=await b.newPage({viewport:{width:1280,height:900}});const frames=()=>p.frames().filter(f=>f.url().includes('razorpay')||f===p.mainFrame());await p.goto('http://127.0.0.1:4173');await p.getByRole('button',{name:'Pay'}).click();
+          let contact;for(let i=0;i<20&&!contact;i++){for(const f of frames()){try{const x=f.locator('input[placeholder="Mobile number"]').first();if(await x.count()&&await x.isVisible({timeout:500})){contact=x;break}}catch{}}if(!contact)await p.waitForTimeout(500)}if(!contact)throw Error('contact field missing');await contact.fill('9999999999');
+          let cont;for(const f of frames()){try{const x=f.getByRole('button',{name:/continue/i}).last();if(await x.count()&&await x.isVisible({timeout:500})){cont=x;break}}catch{}}if(!cont)throw Error('continue missing');await cont.click({timeout:3000});
+          await p.waitForTimeout(1000);await p.screenshot({path:'/tmp/rzp/after-contact.png',fullPage:true});
+          let upi;for(const f of frames()){try{const x=f.getByText('UPI',{exact:true}).first();if(await x.count()&&await x.isVisible({timeout:500})){await x.click({timeout:3000});break}}catch{}}
+          for(let i=0;i<20&&!upi;i++){for(const f of frames())for(const s of ['input[placeholder*="UPI" i]','input[name*="upi" i]','input[placeholder*="VPA" i]']){try{const x=f.locator(s).first();if(await x.count()&&await x.isVisible({timeout:500})){upi=x;break}}catch{}}if(!upi)await p.waitForTimeout(500)}
+          if(!upi)throw Error('UPI input missing');await upi.fill('success@razorpay');await p.screenshot({path:'/tmp/rzp/upi-filled.png',fullPage:true});
+          let pay;for(const f of frames())for(const n of [/verify\s*and\s*pay/i,/pay/i,/proceed/i]){try{const x=f.getByRole('button',{name:n}).last();if(await x.count()&&await x.isVisible({timeout:500})){pay=x;break}}catch{}if(pay)break}if(!pay)throw Error('pay button missing');await pay.click({timeout:3000});
+          await p.waitForFunction(()=>!!window.result,null,{timeout:30000});const result=await p.evaluate(()=>window.result);if(!result?.razorpay_payment_id)throw Error('no payment result');console.log('CHECKOUT RESULT PASS',result.razorpay_payment_id);const v=await api('/api/v1/payments/verify',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({razorpay_order_id:result.razorpay_order_id,razorpay_payment_id:result.razorpay_payment_id,razorpay_signature:result.razorpay_signature})});if(v.status!=='captured')throw Error('verify failed');console.log('VERIFY PASS');await b.close();})().catch(e=>{console.error(e.stack||e);process.exit(1)})
+          NODE
+          cd /tmp/rzp;python3 -m http.server 4173 >/tmp/rzp/server.log 2>&1 & P=$!;trap 'kill $P || true' EXIT;node test.js
+      - name: Diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: razorpay-checkout-diagnostic
+          path: /tmp/rzp
+          if-no-files-found: ignore
