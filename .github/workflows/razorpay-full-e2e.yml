@@ -58,7 +58,7 @@ jobs:
           npm install --no-save playwright@latest
           npx playwright install --with-deps chromium
 
-      - name: Real Razorpay Test Checkout via UPI
+      - name: Real Razorpay Test Checkout via card
         run: |
           set -Eeuo pipefail
           mkdir -p /tmp/rzp
@@ -70,19 +70,30 @@ jobs:
             const l=await api('/api/v1/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,password})});
             const token=l.session.access_token;
             const order=await api('/api/v1/payments/orders',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({plan_code:'starter'})});
-            fs.writeFileSync('/tmp/rzp/index.html',`<!doctype html><button id="pay">Pay</button><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const o={key:${JSON.stringify(order.razorpay_key_id)},amount:${order.amount_inr_paise},currency:'INR',name:'Job Finder Test',description:'Test',order_id:${JSON.stringify(order.order_id)},prefill:{name:'CI Test User',email:${JSON.stringify(email)},contact:'+919999999999'},handler:r=>window.paymentResult=r};new Razorpay(o).open=function(){};const rzp=new Razorpay(o);document.getElementById('pay').onclick=()=>rzp.open();</script>`);
+            fs.writeFileSync('/tmp/rzp/index.html',`<!doctype html><button id="pay">Pay</button><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const o={key:${JSON.stringify(order.razorpay_key_id)},amount:${order.amount_inr_paise},currency:'INR',name:'Job Finder Test',description:'Test',order_id:${JSON.stringify(order.order_id)},prefill:{name:'CI Test User',email:${JSON.stringify(email)},contact:'+919999999999'},handler:r=>window.paymentResult=r};const rzp=new Razorpay(o);document.getElementById('pay').onclick=()=>rzp.open();</script>`);
             const b=await chromium.launch({headless:true}); const p=await b.newPage({viewport:{width:1280,height:900}});
             p.on('console',m=>console.log('browser:',m.text())); p.on('pageerror',e=>console.log('pageerror:',e.message));
             await p.goto('http://127.0.0.1:4173/index.html'); await p.getByRole('button',{name:'Pay'}).click();
             const frames=()=>p.frames().filter(f=>f.url().includes('razorpay')||f===p.mainFrame());
-            let upi=null;
-            for(let i=0;i<50&&!upi;i++){for(const f of frames()){for(const s of ['input[placeholder*="UPI" i]','input[name*="upi" i]','input[placeholder*="VPA" i]']){try{const x=f.locator(s).first();if(await x.count()&&await x.isVisible()){upi=x;break}}catch{}}if(upi)break}if(!upi)await p.waitForTimeout(500)}
-            if(!upi){await p.screenshot({path:'/tmp/rzp/checkout.png',fullPage:true});throw Error('UPI input not found')}
-            await upi.fill('success@razorpay');
-            let pay=null; for(const f of frames()){for(const n of [/verify\s*and\s*pay/i,/pay/i,/proceed/i]){try{const x=f.getByRole('button',{name:n}).last();if(await x.count()&&await x.isVisible()){pay=x;break}}catch{}}if(pay)break}
-            if(!pay)throw Error('UPI Pay button not found'); await pay.click();
+            let contact=null;
+            for(let i=0;i<40&&!contact;i++){for(const f of frames()){try{const x=f.locator('input[placeholder="Mobile number"]').first();if(await x.count()&&await x.isVisible()){contact=x;break}}catch{}}if(!contact)await p.waitForTimeout(500)}
+            if(!contact){await p.screenshot({path:'/tmp/rzp/contact.png',fullPage:true});throw Error('Razorpay contact mobile field not found')}
+            await contact.fill('9999999999');
+            let cont=null; for(const f of frames()){try{const x=f.getByRole('button',{name:/continue/i}).last();if(await x.count()&&await x.isVisible()){cont=x;break}}catch{}}
+            if(!cont)throw Error('Razorpay contact Continue button not found'); await cont.click();
+            let cards=null; for(let i=0;i<30&&!cards;i++){for(const f of frames()){try{const x=f.getByText('Cards',{exact:true}).first();if(await x.count()&&await x.isVisible()){cards=x;break}}catch{}}if(!cards)await p.waitForTimeout(500)}
+            if(!cards)throw Error('Razorpay Cards option not found'); await cards.click();
+            const find=async selectors=>{for(const f of frames())for(const s of selectors){try{const x=f.locator(s).first();if(await x.count()&&await x.isVisible())return x}catch{}}return null};
+            const card=await find(['input[autocomplete="cc-number"]','input[placeholder*="Card Number" i]','input[name*="card" i][name*="number" i]']);
+            const expiry=await find(['input[autocomplete="cc-exp"]','input[placeholder*="MM" i][placeholder*="YY" i]','input[name*="expiry" i]']);
+            const cvv=await find(['input[autocomplete="cc-csc"]','input[placeholder*="CVV" i]','input[name*="cvv" i]']);
+            if(!card||!expiry||!cvv){await p.screenshot({path:'/tmp/rzp/card-form.png',fullPage:true});throw Error('Razorpay card inputs not found')}
+            await card.fill('4111111111111111'); await expiry.fill('12/30'); await cvv.fill('123');
+            let pay=null; for(const f of frames()){for(const n of [/pay\s*₹?299/i,/pay\s*now/i,/pay/i]){try{const x=f.getByRole('button',{name:n}).last();if(await x.count()&&await x.isVisible()){pay=x;break}}catch{}}if(pay)break}
+            if(!pay)throw Error('Razorpay card Pay button not found'); await pay.click();
+            for(let i=0;i<30;i++){for(const f of frames()){try{const otp=f.locator('input[placeholder*="OTP" i],input[name*="otp" i]').first();if(await otp.count()&&await otp.isVisible()){await otp.fill('1111');const v=f.getByRole('button',{name:/verify|submit|pay/i}).last();if(await v.count()&&await v.isVisible())await v.click()}}catch{}}await p.waitForTimeout(500)}
             await p.waitForFunction(()=>!!window.paymentResult,null,{timeout:45000}); const result=await p.evaluate(()=>window.paymentResult);
-            if(!result?.razorpay_payment_id||!result?.razorpay_order_id||!result?.razorpay_signature)throw Error('Incomplete checkout result');
+            if(!result?.razorpay_payment_id||!result?.razorpay_order_id||!result?.razorpay_signature)throw Error('Incomplete checkout result: '+JSON.stringify(result));
             console.log('CHECKOUT RESULT: PASS');
             const v=await api('/api/v1/payments/verify',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({razorpay_order_id:result.razorpay_order_id,razorpay_payment_id:result.razorpay_payment_id,razorpay_signature:result.razorpay_signature})});
             if(v.status!=='captured')throw Error('Verification did not capture payment: '+JSON.stringify(v)); console.log('SIGNATURE VERIFICATION + CAPTURE: PASS');
