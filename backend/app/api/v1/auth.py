@@ -29,6 +29,17 @@ def _profile_for_user(user_id: str, email: str | None = None, full_name: str | N
     return load_profile(UUID(user_id), email, full_name)
 
 
+def _profile_for_email(email: str):
+    from app.auth.schemas import UserProfile
+    with get_engine().connect() as connection:
+        row = connection.execute(text("select id, email, full_name, role, status, plan_code from public.profiles where lower(email) = lower(:email)"), {"email": email}).mappings().one_or_none()
+    if not row:
+        return None
+    data = dict(row)
+    data["id"] = str(data["id"])
+    return UserProfile(**data)
+
+
 def _unauthorized_status(exc: SupabaseAuthError) -> int:
     return status.HTTP_401_UNAUTHORIZED if exc.status_code in (401, 403) else exc.status_code
 
@@ -50,7 +61,13 @@ def signup(request: SignupRequest):
     user = payload.get("user") or {}
     user_id = user.get("id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Signup is temporarily rate limited. Please try again later.")
+        # Supabase can complete the signup and send the confirmation email while
+        # returning no user payload. Confirm the database trigger created the
+        # application profile before treating the response as a failure.
+        profile = _profile_for_email(request.email.lower())
+        if not profile:
+            raise HTTPException(status_code=502, detail="Supabase signup completed without a user profile")
+        return AuthResponse(user=profile, session=None, email_confirmation_required=True)
     profile = load_profile(UUID(user_id), user.get("email"), request.full_name)
     return AuthResponse(user=profile, session=_session(payload), email_confirmation_required=payload.get("session") is None)
 
