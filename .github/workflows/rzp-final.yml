@@ -28,6 +28,41 @@ jobs:
           exit 1
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Pre-flight API check
+        run: |
+          set -e
+          echo "=== Checking env vars ==="
+          echo "BASE_URL: $BASE_URL"
+          [ -n "$EMAIL" ] && echo "EMAIL: SET (${EMAIL:0:3}***)" || echo "EMAIL: MISSING - FAIL"
+          [ -n "$PASSWORD" ] && echo "PASSWORD: SET" || echo "PASSWORD: MISSING - FAIL"
+          [ -z "$EMAIL" ] || [ -z "$PASSWORD" ] && exit 1 || true
+          
+          echo "=== Login test ==="
+          LOGIN_RESP=$(curl -sS --http1.1 --max-time 30 -w '\n%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/login" \
+            -H "Content-Type: application/json" \
+            --data "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}")
+          LOGIN_CODE=$(echo "$LOGIN_RESP" | tail -1)
+          LOGIN_BODY=$(echo "$LOGIN_RESP" | head -n -1)
+          echo "Login HTTP: $LOGIN_CODE"
+          echo "Login body (truncated): ${LOGIN_BODY:0:200}"
+          [ "$LOGIN_CODE" = "200" ] || { echo "LOGIN FAILED"; exit 1; }
+          
+          TOKEN=$(echo "$LOGIN_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['session']['access_token'])")
+          echo "Token: ${TOKEN:0:20}..."
+          
+          echo "=== Order creation test ==="
+          ORDER_RESP=$(curl -sS --http1.1 --max-time 30 -w '\n%{http_code}' \
+            -X POST "$BASE_URL/api/v1/payments/orders" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"plan_code":"starter"}')
+          ORDER_CODE=$(echo "$ORDER_RESP" | tail -1)
+          ORDER_BODY=$(echo "$ORDER_RESP" | head -n -1)
+          echo "Order HTTP: $ORDER_CODE"
+          echo "Order body: $ORDER_BODY"
+          [ "$ORDER_CODE" = "200" ] || { echo "ORDER CREATION FAILED"; exit 1; }
+          echo "PRE-FLIGHT: PASS"
       - name: Install Node.js dependencies
         run: |
           npm init -y >/dev/null 2>&1
