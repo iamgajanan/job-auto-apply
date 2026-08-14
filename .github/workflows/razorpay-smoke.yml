@@ -17,6 +17,19 @@ jobs:
       BASE_URL: https://jobs.n8npi.live
 
     steps:
+      - name: Wait for deployed backend
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for i in {1..60}; do
+            code=$(curl -sS --http1.1 --max-time 10 -o /tmp/health -w '%{http_code}' "$BASE_URL/api/v1/health/database" || true)
+            echo "backend health attempt $i: $code"
+            if [ "$code" = 200 ]; then cat /tmp/health; exit 0; fi
+            sleep 3
+          done
+          echo 'Backend did not become healthy within 180 seconds.'
+          exit 1
+
       - name: Login and create Razorpay test order
         shell: bash
         run: |
