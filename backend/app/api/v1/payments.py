@@ -55,7 +55,7 @@ def payment_history(
             text(
                 """
                 select
-                    pay.id,
+                    pay.id::text as id,
                     pay.plan_code,
                     coalesce(plan.name, pay.plan_code) as plan_name,
                     pay.provider,
