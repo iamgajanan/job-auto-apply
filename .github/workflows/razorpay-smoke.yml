@@ -1,0 +1,89 @@
+name: Razorpay Backend Smoke Test
+
+on:
+  push:
+    branches: [just-scrapping]
+    paths:
+      - ".github/workflows/razorpay-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  razorpay-smoke:
+    name: Razorpay order and webhook smoke test
+    runs-on: ubuntu-latest
+    env:
+      CI_TEST_USER_EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
+      CI_TEST_USER_PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
+      BASE_URL: https://jobs.n8npi.live
+
+    steps:
+      - name: Login and create Razorpay test order
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$CI_TEST_USER_EMAIL"
+          test -n "$CI_TEST_USER_PASSWORD"
+
+          TMP=$(mktemp -d)
+          trap 'rm -rf "$TMP"' EXIT
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/login" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/login" \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$CI_TEST_USER_EMAIL\",\"password\":\"$CI_TEST_USER_PASSWORD\"}")
+          [ "$code" = 200 ] || { echo "Login failed: HTTP $code"; cat "$TMP/login"; exit 1; }
+
+          TOKEN=$(python - "$TMP/login" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          print((d.get('session') or {}).get('access_token',''))
+          PY
+          )
+          [ -n "$TOKEN" ]
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/order" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/payments/orders" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"plan_code":"starter"}')
+          [ "$code" = 200 ] || { echo "Razorpay order creation failed: HTTP $code"; cat "$TMP/order"; exit 1; }
+
+          python - "$TMP/order" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          assert d['plan_code']=='starter', d
+          assert d['amount_inr_paise']==29900, d
+          assert d['currency']=='INR', d
+          assert d['order_id'].startswith('order_'), d
+          assert d.get('razorpay_key_id','').startswith('rzp_test_'), d
+          print('Razorpay order creation: PASS')
+          print('order_id:', d['order_id'])
+          print('amount_inr_paise:', d['amount_inr_paise'])
+          PY
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/history" -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" \
+            "$BASE_URL/api/v1/payments/history")
+          [ "$code" = 200 ] || { echo "Payment history failed: HTTP $code"; cat "$TMP/history"; exit 1; }
+          python - "$TMP/history" "$TMP/order" <<'PY'
+          import json,sys
+          history=json.load(open(sys.argv[1]))
+          order=json.load(open(sys.argv[2]))
+          rows=history.get('payments',[])
+          assert any(r.get('provider_order_id')==order['order_id'] and r.get('status')=='created' for r in rows), history
+          print('Payment history persistence: PASS')
+          PY
+
+      - name: Verify webhook rejects invalid signature
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          body='{"id":"smoke_invalid_signature","event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_smoke","order_id":"order_smoke"}}}}'
+          code=$(curl -sS --http1.1 --max-time 30 -o /tmp/webhook-response -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/payments/webhook" \
+            -H 'Content-Type: application/json' \
+            -H 'X-Razorpay-Signature: invalid-signature' \
+            --data "$body")
+          [ "$code" = 400 ] || { echo "Expected HTTP 400 for invalid webhook signature, got $code"; cat /tmp/webhook-response; exit 1; }
+          echo 'Webhook signature rejection: PASS'
+          echo 'RAZORPAY BACKEND SMOKE TEST: PASS'
