@@ -58,7 +58,7 @@ jobs:
           npm install --no-save playwright@latest
           npx playwright install --with-deps chromium
 
-      - name: Real Razorpay Test Checkout via card
+      - name: Real Razorpay Test Checkout via UPI
         run: |
           set -Eeuo pipefail
           mkdir -p /tmp/rzp
@@ -81,17 +81,12 @@ jobs:
             await contact.fill('9999999999');
             let cont=null; for(const f of frames()){try{const x=f.getByRole('button',{name:/continue/i}).last();if(await x.count()&&await x.isVisible()){cont=x;break}}catch{}}
             if(!cont)throw Error('Razorpay contact Continue button not found'); await cont.click();
-            let cards=null; for(let i=0;i<30&&!cards;i++){for(const f of frames()){try{const x=f.getByText('Cards',{exact:true}).first();if(await x.count()&&await x.isVisible()){cards=x;break}}catch{}}if(!cards)await p.waitForTimeout(500)}
-            if(!cards)throw Error('Razorpay Cards option not found'); await cards.click();
-            const find=async selectors=>{for(const f of frames())for(const s of selectors){try{const x=f.locator(s).first();if(await x.count()&&await x.isVisible())return x}catch{}}return null};
-            const card=await find(['input[autocomplete="cc-number"]','input[placeholder*="Card Number" i]','input[name*="card" i][name*="number" i]']);
-            const expiry=await find(['input[autocomplete="cc-exp"]','input[placeholder*="MM" i][placeholder*="YY" i]','input[name*="expiry" i]']);
-            const cvv=await find(['input[autocomplete="cc-csc"]','input[placeholder*="CVV" i]','input[name*="cvv" i]']);
-            if(!card||!expiry||!cvv){await p.screenshot({path:'/tmp/rzp/card-form.png',fullPage:true});throw Error('Razorpay card inputs not found')}
-            await card.fill('4111111111111111'); await expiry.fill('12/30'); await cvv.fill('123');
-            let pay=null; for(const f of frames()){for(const n of [/pay\s*₹?299/i,/pay\s*now/i,/pay/i]){try{const x=f.getByRole('button',{name:n}).last();if(await x.count()&&await x.isVisible()){pay=x;break}}catch{}}if(pay)break}
-            if(!pay)throw Error('Razorpay card Pay button not found'); await pay.click();
-            for(let i=0;i<30;i++){for(const f of frames()){try{const otp=f.locator('input[placeholder*="OTP" i],input[name*="otp" i]').first();if(await otp.count()&&await otp.isVisible()){await otp.fill('1111');const v=f.getByRole('button',{name:/verify|submit|pay/i}).last();if(await v.count()&&await v.isVisible())await v.click()}}catch{}}await p.waitForTimeout(500)}
+            let upi=null; for(let i=0;i<30&&!upi;i++){for(const f of frames()){try{const tab=f.getByText('UPI',{exact:true}).first();if(await tab.count()&&await tab.isVisible()){await tab.click();break}}catch{}}for(const f of frames()){for(const s of ['input[placeholder*="UPI" i]','input[name*="upi" i]','input[placeholder*="VPA" i]']){try{const x=f.locator(s).first();if(await x.count()&&await x.isVisible()){upi=x;break}}catch{}}if(upi)break}if(!upi)await p.waitForTimeout(500)}
+            if(!upi){await p.screenshot({path:'/tmp/rzp/upi.png',fullPage:true});throw Error('Razorpay UPI input not found')}
+            await upi.fill('success@razorpay');
+            let pay=null; for(const f of frames()){for(const n of [/verify\s*and\s*pay/i,/pay/i,/proceed/i]){try{const x=f.getByRole('button',{name:n}).last();if(await x.count()&&await x.isVisible()){pay=x;break}}catch{}}if(pay)break}
+            if(!pay){await p.screenshot({path:'/tmp/rzp/upi-before-pay.png',fullPage:true});throw Error('Razorpay UPI Pay button not found')} await pay.click();
+            await p.waitForTimeout(3000); await p.screenshot({path:'/tmp/rzp/after-pay.png',fullPage:true});
             await p.waitForFunction(()=>!!window.paymentResult,null,{timeout:45000}); const result=await p.evaluate(()=>window.paymentResult);
             if(!result?.razorpay_payment_id||!result?.razorpay_order_id||!result?.razorpay_signature)throw Error('Incomplete checkout result: '+JSON.stringify(result));
             console.log('CHECKOUT RESULT: PASS');
