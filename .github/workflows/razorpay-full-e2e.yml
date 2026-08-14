@@ -1,0 +1,160 @@
+name: Razorpay Full E2E Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [just-scrapping]
+    paths:
+      - ".github/workflows/razorpay-full-e2e.yml"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      BASE_URL: https://jobs.n8npi.live
+      CI_TEST_USER_EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
+      CI_TEST_USER_PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
+
+    steps:
+      - name: Wait for backend
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for i in {1..60}; do
+            code=$(curl -sS --http1.1 --max-time 10 -o /tmp/health -w '%{http_code}' "$BASE_URL/api/v1/health/database" || true)
+            if [ "$code" = 200 ]; then cat /tmp/health; exit 0; fi
+            sleep 3
+          done
+          exit 1
+
+      - name: API and webhook security checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TMP=$(mktemp -d)
+          trap 'rm -rf "$TMP"' EXIT
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/login" -w '%{http_code}' -X POST "$BASE_URL/api/v1/auth/login" -H 'Content-Type: application/json' --data "{\"email\":\"$CI_TEST_USER_EMAIL\",\"password\":\"$CI_TEST_USER_PASSWORD\"}")
+          [ "$code" = 200 ]
+          TOKEN=$(python - "$TMP/login" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))["session"]["access_token"])
+          PY
+          )
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/order" -w '%{http_code}' -X POST "$BASE_URL/api/v1/payments/orders" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data '{"plan_code":"starter"}')
+          [ "$code" = 200 ]
+          python - "$TMP/order" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          assert d["plan_code"]=="starter"
+          assert d["amount_inr_paise"]==29900
+          assert d["currency"]=="INR"
+          assert d["order_id"].startswith("order_")
+          assert d["razorpay_key_id"].startswith("rzp_test_")
+          print("ORDER: PASS")
+          PY
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/history" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/v1/payments/history")
+          [ "$code" = 200 ]
+          python - "$TMP/history" "$TMP/order" <<'PY'
+          import json,sys
+          h=json.load(open(sys.argv[1])); o=json.load(open(sys.argv[2]))
+          assert any(x["provider_order_id"]==o["order_id"] and x["status"]=="created" for x in h["payments"])
+          print("ORDER PERSISTENCE: PASS")
+          PY
+          code=$(curl -sS --http1.1 --max-time 30 -o /tmp/webhook -w '%{http_code}' -X POST "$BASE_URL/api/v1/payments/webhook" -H 'Content-Type: application/json' -H 'X-Razorpay-Signature: invalid-signature' --data '{"id":"e2e-invalid","event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_invalid","order_id":"order_invalid"}}}}')
+          [ "$code" = 400 ]
+          echo "INVALID WEBHOOK SIGNATURE: PASS"
+
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@latest
+          npx playwright install --with-deps chromium
+
+      - name: Real Razorpay Test Checkout via UPI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/rzp
+          cat >/tmp/rzp/test.js <<'NODE'
+          const fs = require('fs');
+          const { chromium } = require('/tmp/node_modules/playwright');
+          const baseUrl = process.env.BASE_URL;
+          const email = process.env.CI_TEST_USER_EMAIL;
+          const password = process.env.CI_TEST_USER_PASSWORD;
+          async function api(path, options={}) {
+            const r = await fetch(baseUrl + path, options);
+            const text = await r.text();
+            let data; try { data = JSON.parse(text); } catch { data = {raw:text}; }
+            if (!r.ok) throw new Error(`${path}: HTTP ${r.status} ${text}`);
+            return data;
+          }
+          (async () => {
+            const login = await api('/api/v1/auth/login', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,password})});
+            const token = login.session.access_token;
+            const order = await api('/api/v1/payments/orders', {method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({plan_code:'starter'})});
+            const html = `<!doctype html><html><body><button id="pay">Pay</button><pre id="result"></pre><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const options={key:${JSON.stringify(order.razorpay_key_id)},amount:${order.amount_inr_paise},currency:'INR',name:'Job Finder Test',description:'Automated Test Payment',order_id:${JSON.stringify(order.order_id)},prefill:{name:'CI Test User',email:${JSON.stringify(email)},contact:'+919999999999'},handler:r=>{window.paymentResult=r;document.getElementById('result').textContent=JSON.stringify(r)},modal:{ondismiss:()=>window.paymentDismissed=true}};const rz=new Razorpay(options);document.getElementById('pay').onclick=()=>rz.open();</script></body></html>`;
+            fs.writeFileSync('/tmp/rzp/index.html', html);
+            const browser = await chromium.launch({headless:true});
+            const page = await browser.newPage({viewport:{width:1280,height:900},ignoreHTTPSErrors:true});
+            page.on('console',m=>console.log('browser:',m.text()));
+            page.on('pageerror',e=>console.log('pageerror:',e.message));
+            await page.goto('https://127.0.0.1:4173/index.html');
+            await page.getByRole('button',{name:'Pay'}).click();
+            const frames=()=>page.frames().filter(f=>f.url().includes('razorpay')||f===page.mainFrame());
+            let upiInput=null;
+            for(let i=0;i<40&&!upiInput;i++){
+              for(const f of frames()) for(const selector of ['input[placeholder*="UPI" i]','input[name*="upi" i]','input[placeholder*="VPA" i]']){
+                try{const x=f.locator(selector).first();if(await x.count()&&await x.isVisible()){upiInput=x;break}}catch{}
+              }
+              if(!upiInput) await page.waitForTimeout(500);
+            }
+            if(!upiInput){await page.screenshot({path:'/tmp/rzp/checkout.png',fullPage:true});throw new Error('Razorpay UPI input was not found')}
+            await upiInput.fill('success@razorpay');
+            let payButton=null;
+            for(const f of frames()) for(const label of [/verify\s*and\s*pay/i,/pay/i,/proceed/i]){
+              try{const x=f.getByRole('button',{name:label}).last();if(await x.count()&&await x.isVisible()){payButton=x;break}}catch{}
+            }
+            if(!payButton) throw new Error('Razorpay UPI Pay button was not found');
+            await payButton.click();
+            await page.waitForFunction(()=>!!window.paymentResult,null,{timeout:45000});
+            const result=await page.evaluate(()=>window.paymentResult);
+            if(!result?.razorpay_payment_id||!result?.razorpay_order_id||!result?.razorpay_signature) throw new Error('Incomplete Razorpay handler result: '+JSON.stringify(result));
+            console.log('CHECKOUT RESULT: PASS');
+            const verify=await api('/api/v1/payments/verify',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({razorpay_order_id:result.razorpay_order_id,razorpay_payment_id:result.razorpay_payment_id,razorpay_signature:result.razorpay_signature})});
+            if(verify.status!=='captured') throw new Error('Payment verification failed: '+JSON.stringify(verify));
+            console.log('SIGNATURE VERIFICATION + CAPTURE: PASS');
+            let row=null;
+            for(let i=0;i<30;i++){const h=await api('/api/v1/payments/history',{headers:{authorization:`Bearer ${token}`}});row=h.payments.find(x=>x.provider_order_id===order.order_id);if(row?.status==='captured')break;await new Promise(r=>setTimeout(r,1000))}
+            if(!row||row.status!=='captured')throw new Error('Captured payment missing from history');
+            if(row.provider_payment_id!==result.razorpay_payment_id)throw new Error('Payment ID mismatch in history');
+            console.log('PAYMENT HISTORY CAPTURED: PASS');
+            const me=await api('/api/v1/account/me',{headers:{authorization:`Bearer ${token}`}});
+            if(me.plan_code!=='starter')throw new Error('Profile plan was not upgraded: '+JSON.stringify(me));
+            console.log('PLAN UPGRADE: PASS');
+            await browser.close();
+            console.log('RAZORPAY FULL CHECKOUT E2E: PASS');
+          })().catch(e=>{console.error(e.stack||e);process.exit(1)});
+          NODE
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/rzp/key.pem -out /tmp/rzp/cert.pem -days 1 -subj '/CN=127.0.0.1' >/dev/null 2>&1
+          cd /tmp/rzp
+          python3 - <<'PY' >/tmp/https.log 2>&1 &
+          import http.server, ssl
+          server=http.server.ThreadingHTTPServer(('127.0.0.1',4173),http.server.SimpleHTTPRequestHandler)
+          server.socket=ssl.wrap_socket(server.socket,certfile='/tmp/rzp/cert.pem',keyfile='/tmp/rzp/key.pem',server_side=True)
+          server.serve_forever()
+          PY
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID || true' EXIT
+          cd - >/dev/null
+          node /tmp/rzp/test.js
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: razorpay-full-e2e-diagnostics
+          path: /tmp/rzp/
+          if-no-files-found: ignore
