@@ -8,6 +8,7 @@ from app.api.v1.health import router as health_router
 from app.api.v1.jobs import router as jobs_router
 from app.api.v1.payments import router as payments_router
 from app.api.v1.plans import router as plans_router
+from app.api.v1.saved_searches import router as saved_searches_router
 
 router = APIRouter()
 
@@ -19,3 +20,4 @@ router.include_router(payments_router)
 router.include_router(admin_router)
 router.include_router(admin_payments_router)
 router.include_router(jobs_router)
+router.include_router(saved_searches_router)
