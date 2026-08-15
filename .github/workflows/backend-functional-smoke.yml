@@ -1,0 +1,101 @@
+name: Backend Functional Smoke Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [just-scrapping]
+    paths:
+      - .github/workflows/backend-functional-smoke.yml
+      - backend/app/api/v1/auth.py
+      - backend/app/api/v1/jobs.py
+      - backend/app/auth/**
+      - backend/app/features/jobs/**
+
+jobs:
+  functional-smoke:
+    runs-on: ubuntu-latest
+    env:
+      BASE_URL: https://jobs.n8npi.live
+      CI_TEST_USER_EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
+      CI_TEST_USER_PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
+
+    steps:
+      - name: Wait for backend
+        run: |
+          set -Eeuo pipefail
+          for i in {1..40}; do
+            code=$(curl -sS --http1.1 --max-time 10 -o /tmp/health -w '%{http_code}' \
+              "$BASE_URL/api/v1/health/database" || true)
+            echo "health attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then cat /tmp/health; exit 0; fi
+            sleep 3
+          done
+          exit 1
+
+      - name: Signup fresh user
+        run: |
+          set -Eeuo pipefail
+          TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+          EMAIL="ci-smoke-${GITHUB_RUN_ID}@example.com"
+          PASSWORD="CiSmoke-${GITHUB_RUN_ID}-Aa1!"
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/signup" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/signup" \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"full_name\":\"CI Smoke User\"}")
+          echo "Signup HTTP: $code"
+          [ "$code" = "201" ] || { cat "$TMP/signup"; exit 1; }
+          python3 -c "
+import json
+x=json.load(open('$TMP/signup'))
+assert x.get('user',{}).get('id'), x
+assert x.get('user',{}).get('email','').lower() == '$EMAIL'.lower(), x
+print('SIGNUP: PASS')
+print('email_confirmation_required=', x.get('email_confirmation_required'))
+"
+
+      - name: Login existing CI user
+        run: |
+          set -Eeuo pipefail
+          test -n "$CI_TEST_USER_EMAIL"
+          test -n "$CI_TEST_USER_PASSWORD"
+          TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/login" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/login" \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$CI_TEST_USER_EMAIL\",\"password\":\"$CI_TEST_USER_PASSWORD\"}")
+          echo "Login HTTP: $code"
+          [ "$code" = "200" ] || { cat "$TMP/login"; exit 1; }
+          python3 -c "
+import json
+x=json.load(open('$TMP/login'))
+assert x.get('session',{}).get('access_token'), x
+assert x.get('user',{}).get('id'), x
+print('LOGIN: PASS')
+"
+          python3 -c "import json; print('SMOKE_TOKEN=' + json.load(open('$TMP/login'))['session']['access_token'])" >> "$GITHUB_ENV"
+
+      - name: Authenticated account check
+        run: |
+          set -Eeuo pipefail
+          code=$(curl -sS --http1.1 --max-time 30 -o /tmp/me -w '%{http_code}' \
+            -H "Authorization: Bearer $SMOKE_TOKEN" "$BASE_URL/api/v1/auth/me")
+          echo "Auth /me HTTP: $code"
+          [ "$code" = "200" ] || { cat /tmp/me; exit 1; }
+          python3 -c "import json; x=json.load(open('/tmp/me')); assert x.get('id'), x; print('AUTH ME: PASS')"
+
+      - name: Search jobs with authenticated user
+        run: |
+          set -Eeuo pipefail
+          code=$(curl -sS --http1.1 --max-time 150 -o /tmp/jobs -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/jobs/search" \
+            -H "Authorization: Bearer $SMOKE_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"platform":"linkedin","job_title":"React Developer","location":"Pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}')
+          echo "Job search HTTP: $code"
+          [ "$code" = "200" ] || { cat /tmp/jobs; exit 1; }
+          python3 -c "
+import json
+x=json.load(open('/tmp/jobs'))
+assert isinstance(x.get('jobs'), list), x
+print('JOB SEARCH: PASS results=' + str(len(x['jobs'])))
+"
