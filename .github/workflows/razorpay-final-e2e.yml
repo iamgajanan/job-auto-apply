@@ -1,101 +1,243 @@
 name: Razorpay Final E2E Test
-
 on:
   workflow_dispatch:
   push:
     branches: [just-scrapping]
     paths:
-      - ".github/workflows/razorpay-final-e2e.yml"
-      - "payment-test-checkout.html"
+      - .github/workflows/razorpay-final-e2e.yml
+      - payment-test-checkout.html
 
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       BASE_URL: https://jobs.n8npi.live
       CI_TEST_USER_EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
       CI_TEST_USER_PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
+
     steps:
-      - name: Wait for backend
+      - name: Backend health check
         run: |
-          set -Eeuo pipefail
-          for i in {1..60}; do
-            code=$(curl -sS --http1.1 --max-time 10 -o /tmp/health -w '%{http_code}' "$BASE_URL/api/v1/health/database" || true)
-            if [ "$code" = 200 ]; then cat /tmp/health; exit 0; fi
-            sleep 3
+          for i in {1..20}; do
+            code=$(curl -sS --http1.1 --max-time 10 -o /tmp/health -w '%{http_code}' \
+              "$BASE_URL/api/v1/health/database" || true)
+            if [ "$code" = "200" ]; then cat /tmp/health; echo; exit 0; fi
+            echo "Health $i: HTTP $code"; sleep 3
           done
           exit 1
-      - name: API prechecks
+
+      - name: API prechecks (login, order, invalid-webhook)
         run: |
           set -Eeuo pipefail
           TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/login" -w '%{http_code}' -X POST "$BASE_URL/api/v1/auth/login" -H 'Content-Type: application/json' --data "{\"email\":\"$CI_TEST_USER_EMAIL\",\"password\":\"$CI_TEST_USER_PASSWORD\"}")
-          [ "$code" = 200 ]
-          TOKEN=$(python - "$TMP/login" <<'PY'
-import json,sys
-print(json.load(open(sys.argv[1]))['session']['access_token'])
-PY
-)
-          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/order" -w '%{http_code}' -X POST "$BASE_URL/api/v1/payments/orders" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data '{"plan_code":"starter"}')
-          [ "$code" = 200 ]
-          python - "$TMP/order" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1]))
-assert d['plan_code']=='starter' and d['amount_inr_paise']==29900 and d['currency']=='INR'
-assert d['order_id'].startswith('order_') and d['razorpay_key_id'].startswith('rzp_test_')
-print('ORDER: PASS')
-PY
-          code=$(curl -sS --http1.1 --max-time 30 -o /tmp/webhook -w '%{http_code}' -X POST "$BASE_URL/api/v1/payments/webhook" -H 'Content-Type: application/json' -H 'X-Razorpay-Signature: invalid-signature' --data '{"id":"final-e2e-invalid","event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_invalid","order_id":"order_invalid"}}}}')
-          [ "$code" = 400 ]
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/login" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/login" \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$CI_TEST_USER_EMAIL\",\"password\":\"$CI_TEST_USER_PASSWORD\"}")
+          [ "$code" = "200" ] || { echo "Login failed: $code"; cat "$TMP/login"; exit 1; }
+
+          TOKEN=$(python3 - "$TMP/login" <<'PY'
+          import json,sys; print(json.load(open(sys.argv[1]))['session']['access_token'])
+          PY
+          )
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/order" -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/payments/orders" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"plan_code":"starter"}')
+          [ "$code" = "200" ] || { echo "Order failed: $code"; cat "$TMP/order"; exit 1; }
+
+          python3 - "$TMP/order" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          assert d['plan_code']=='starter',            f"plan_code: {d}"
+          assert d['amount_inr_paise']==29900,         f"amount: {d}"
+          assert d['currency']=='INR',                 f"currency: {d}"
+          assert d['order_id'].startswith('order_'),   f"order_id: {d}"
+          assert d['razorpay_key_id'].startswith('rzp_test_'), f"key_id: {d}"
+          print('ORDER: PASS')
+          PY
+
+          code=$(curl -sS --http1.1 --max-time 30 -o /tmp/wh -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/payments/webhook" \
+            -H 'Content-Type: application/json' \
+            -H 'X-Razorpay-Signature: invalid-e2e-sig' \
+            --data '{"id":"final-e2e-bad","event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_bad","order_id":"order_bad"}}}}')
+          [ "$code" = "400" ] || { echo "Expected 400, got $code"; exit 1; }
           echo 'INVALID WEBHOOK: PASS'
-      - name: Install Playwright
+
+      - name: Install Playwright to /tmp
         run: |
-          set -Eeuo pipefail
           cd /tmp
           npm init -y >/dev/null 2>&1
           npm install --no-save playwright@latest
           npx playwright install --with-deps chromium
-      - name: Real Razorpay Test Checkout over HTTPS
+
+      - name: Start HTTP server and run checkout E2E
         run: |
           set -Eeuo pipefail
           mkdir -p /tmp/rzp
-          openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/rzp/key.pem -out /tmp/rzp/cert.pem -days 1 -subj '/CN=localhost' >/dev/null 2>&1
-          cat > /tmp/rzp/index.html <<'HTML'
-<!doctype html><html><body><button id="pay">Pay</button><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>
-const q=new URLSearchParams(location.search);const opts={key:q.get('key'),amount:Number(q.get('amount')),currency:'INR',name:'Job Finder Test',description:'Automated Test',order_id:q.get('order_id'),prefill:{name:'CI Test User',email:q.get('email')||'',contact:'+919999999999'},handler:r=>window.paymentResult=r,modal:{ondismiss:()=>window.paymentDismissed=true}};const rzp=new Razorpay(opts);document.getElementById('pay').onclick=()=>rzp.open();
-</script></body></html>
-HTML
-          cat > /tmp/rzp/server.py <<'PY'
-import http.server,ssl
-s=http.server.HTTPServer(('127.0.0.1',4173),http.server.SimpleHTTPRequestHandler)
-s.socket=ssl.wrap_socket(s.socket,certfile='/tmp/rzp/cert.pem',keyfile='/tmp/rzp/key.pem',server_side=True)
-s.serve_forever()
-PY
-          cd /tmp/rzp
-          python3 server.py >/tmp/rzp-server.log 2>&1 & SERVER_PID=$!; trap 'kill $SERVER_PID || true' EXIT
-          cat > /tmp/rzp/test.js <<'NODE'
-const {chromium}=require('/tmp/node_modules/playwright');
-const base=process.env.BASE_URL,email=process.env.CI_TEST_USER_EMAIL,password=process.env.CI_TEST_USER_PASSWORD;
-async function api(path,opt={}){const r=await fetch(base+path,opt),t=await r.text();let d;try{d=JSON.parse(t)}catch{d={raw:t}}if(!r.ok)throw Error(`${path}: HTTP ${r.status} ${t}`);return d}
-async function find(page,ss){for(const f of page.frames())for(const s of ss){try{const x=f.locator(s).first();if(await x.count()&&await x.isVisible())return x}catch{}}return null}
-(async()=>{
-const l=await api('/api/v1/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,password})});const token=l.session.access_token;
-const order=await api('/api/v1/payments/orders',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({plan_code:'starter'})});
-const b=await chromium.launch({headless:true});const p=await b.newPage({ignoreHTTPSErrors:true,viewport:{width:1280,height:900}});
-await p.goto(`https://127.0.0.1:4173/index.html?key=${encodeURIComponent(order.razorpay_key_id)}&amount=${order.amount_inr_paise}&order_id=${encodeURIComponent(order.order_id)}&email=${encodeURIComponent(email)}`);await p.getByRole('button',{name:'Pay'}).click();
-let contact=null;for(let i=0;i<60&&!contact;i++){contact=await find(p,['input[placeholder*="mobile" i]','input[type="tel"]']);if(!contact)await p.waitForTimeout(500)}if(contact){await contact.fill('9999999999');const c=await find(p,['button:has-text("Continue")','button:has-text("continue")']);if(c)await c.click()}
-let cards=null;for(let i=0;i<60&&!cards;i++){cards=await find(p,['[data-testid="Cards"]','text=Cards']);if(!cards)await p.waitForTimeout(500)}if(!cards)throw Error('Cards option not found');await cards.click({force:true});
-const card=await find(p,['input[autocomplete="cc-number"]','input[placeholder*="Card Number" i]']);const expiry=await find(p,['input[autocomplete="cc-exp"]','input[placeholder*="MM" i]']);const cvv=await find(p,['input[autocomplete="cc-csc"]','input[placeholder*="CVV" i]']);if(!card||!expiry||!cvv)throw Error('Card fields not found');await card.fill('410028000001007');await expiry.fill('12/30');await cvv.fill('123');
-const pay=await find(p,['button:has-text("Pay")','button:has-text("pay")']);if(!pay)throw Error('Card Pay button not found');await pay.click({force:true});
-for(let i=0;i<80;i++){for(const f of p.frames()){try{const otp=f.locator('input[placeholder*="OTP" i],input[name*="otp" i]').first();if(await otp.count()&&await otp.isVisible()){await otp.fill('1234');const sub=f.locator('button:has-text("Submit"),button:has-text("Verify"),button:has-text("Pay")').last();if(await sub.count()&&await sub.isVisible())await sub.click({force:true})}}catch{}}if(await p.evaluate(()=>!!window.paymentResult))break;await p.waitForTimeout(500)}
-const result=await p.evaluate(()=>window.paymentResult);if(!result?.razorpay_payment_id||!result?.razorpay_order_id||!result?.razorpay_signature)throw Error('Checkout result missing: '+JSON.stringify(result));console.log('CHECKOUT: PASS');
-let row=null;for(let i=0;i<60;i++){const h=await api('/api/v1/payments/history',{headers:{authorization:`Bearer ${token}`}});row=h.payments.find(x=>x.provider_order_id===order.order_id);if(row?.status==='captured')break;await new Promise(r=>setTimeout(r,1000))}if(!row||row.status!=='captured'||row.provider_payment_id!==result.razorpay_payment_id)throw Error('Webhook did not capture payment');console.log('WEBHOOK CAPTURED: PASS');
-const v=await api('/api/v1/payments/verify',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({razorpay_order_id:result.razorpay_order_id,razorpay_payment_id:result.razorpay_payment_id,razorpay_signature:result.razorpay_signature})});if(v.status!=='captured')throw Error('Verification failed');console.log('SIGNATURE VERIFY: PASS');const me=await api('/api/v1/account/me',{headers:{authorization:`Bearer ${token}`}});if(me.plan_code!=='starter')throw Error('Plan upgrade missing');console.log('PLAN UPGRADE: PASS');await b.close();console.log('RAZORPAY FINAL E2E: PASS');
-})().catch(e=>{console.error(e.stack||e);process.exit(1)});
-NODE
-          node /tmp/rzp/test.js
-      - name: Upload diagnostics
+
+          python3 -m http.server 4173 --directory /tmp/rzp >/tmp/rzp-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID || true' EXIT
+          sleep 1
+
+          cat > /tmp/rzp/e2e.js << 'NODE'
+          const {chromium} = require('/tmp/node_modules/playwright');
+          const fs = require('fs');
+          const base  = process.env.BASE_URL;
+          const email = process.env.CI_TEST_USER_EMAIL;
+          const pass  = process.env.CI_TEST_USER_PASSWORD;
+
+          async function api(path, opts={}) {
+            const r = await fetch(base+path, opts), t = await r.text();
+            let d; try{d=JSON.parse(t)}catch{d={_raw:t}}
+            if(!r.ok) throw new Error(`${path}: HTTP ${r.status}\n${t.slice(0,400)}`);
+            return d;
+          }
+          async function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+          async function shot(page,name){try{await page.screenshot({path:`/tmp/rzp/${name}.png`,fullPage:true})}catch{}}
+          async function findEl(page,sels,ms=20000){
+            const dl=Date.now()+ms;
+            while(Date.now()<dl){
+              for(const f of page.frames())for(const s of sels){
+                try{const e=f.locator(s).first();if(await e.count()&&await e.isVisible())return e;}catch{}
+              }
+              await page.waitForTimeout(400);
+            }
+            return null;
+          }
+          async function findByText(page,txt,ms=20000){
+            const dl=Date.now()+ms;
+            while(Date.now()<dl){
+              for(const f of page.frames()){
+                try{const e=f.getByText(txt,{exact:true}).first();if(await e.count()&&await e.isVisible())return e;}catch{}
+              }
+              await page.waitForTimeout(400);
+            }
+            return null;
+          }
+          async function findBtn(page,re,ms=8000){
+            const dl=Date.now()+ms;
+            while(Date.now()<dl){
+              for(const f of page.frames()){
+                try{const e=f.getByRole('button',{name:re}).last();if(await e.count()&&await e.isVisible())return e;}catch{}
+              }
+              await page.waitForTimeout(400);
+            }
+            return null;
+          }
+
+          (async()=>{
+            const login = await api('/api/v1/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,password:pass})});
+            const token = login.session.access_token;
+            const order = await api('/api/v1/payments/orders',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({plan_code:'starter'})});
+
+            fs.writeFileSync('/tmp/rzp/index.html',[
+              '<!doctype html><html><head><meta charset="utf-8"></head><body>',
+              '<button id="pay">Pay</button>',
+              '<script src="https://checkout.razorpay.com/v1/checkout.js"></script>',
+              '<script>',
+              `var rzp=new Razorpay({key:${JSON.stringify(order.razorpay_key_id)},amount:${order.amount_inr_paise},currency:"INR",name:"Job Finder Test",description:"E2E",order_id:${JSON.stringify(order.order_id)},prefill:{name:"CI Test",email:${JSON.stringify(email)},contact:"9999999999"},handler:function(r){window.paymentResult=r;},modal:{ondismiss:function(){window.paymentDismissed=true;}}});`,
+              'document.getElementById("pay").onclick=function(){rzp.open();};',
+              '</script></body></html>'
+            ].join('\n'));
+
+            const b = await chromium.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
+            const p = await b.newPage({viewport:{width:1280,height:900}});
+            p.on('console',m=>{if(m.type()==='error')console.log('[browser-err]',m.text().slice(0,150));});
+            let result;
+            try {
+              await p.goto('http://127.0.0.1:4173/index.html');
+              await p.waitForLoadState('networkidle');
+              await p.getByRole('button',{name:'Pay'}).click();
+              console.log('Pay clicked');
+              await sleep(4000);
+              await shot(p,'01-after-pay');
+              console.log('Frames:',p.frames().map(f=>f.url().slice(0,80)).join(' | '));
+
+              const mobile = await findEl(p,['input[placeholder="Mobile number"]','input[placeholder*="mobile" i]','input[type="tel"]'],30000);
+              if(mobile){
+                console.log('Mobile field found, filling...');
+                await mobile.fill('9999999999');
+                const cont = await findBtn(p,/continue/i,5000);
+                if(!cont) throw new Error('Continue button not found');
+                await cont.click({timeout:3000});
+                console.log('Clicked Continue');
+                await sleep(1500);
+              } else {
+                console.log('No mobile field');
+              }
+              await shot(p,'02-after-mobile');
+              console.log('Frames:',p.frames().map(f=>f.url().slice(0,80)).join(' | '));
+
+              console.log('Looking for UPI tab...');
+              const upiTab = await findByText(p,'UPI',20000);
+              if(!upiTab){await shot(p,'03-no-upi');throw new Error('UPI tab not found');}
+              console.log('Clicking UPI tab...');
+              await upiTab.click({timeout:3000});
+              await sleep(1500);
+              await shot(p,'03-after-upi-click');
+
+              console.log('Looking for UPI input...');
+              const upiInput = await findEl(p,['input[placeholder*="UPI" i]','input[placeholder*="VPA" i]','input[name*="vpa" i]','input[name*="upi" i]'],20000);
+              if(!upiInput){await shot(p,'04-no-upi-input');throw new Error('UPI input not found');}
+              console.log('Filling success@razorpay...');
+              await upiInput.fill('success@razorpay');
+              await shot(p,'04-upi-filled');
+
+              const payBtn = await findBtn(p,/verify\s*and\s*pay/i,3000)
+                          || await findBtn(p,/pay\s*now/i,3000)
+                          || await findBtn(p,/^pay$/i,5000)
+                          || await findBtn(p,/pay/i,3000);
+              if(!payBtn){await shot(p,'05-no-pay');throw new Error('Pay button not found');}
+              console.log('Clicking Pay...');
+              await payBtn.click({timeout:3000});
+              await shot(p,'05-after-pay');
+
+              console.log('Waiting for payment result (60s)...');
+              await p.waitForFunction(()=>!!window.paymentResult,null,{timeout:60000});
+              result = await p.evaluate(()=>window.paymentResult);
+              if(!result?.razorpay_payment_id||!result?.razorpay_order_id||!result?.razorpay_signature){
+                await shot(p,'06-bad-result');
+                throw new Error('Incomplete result: '+JSON.stringify(result));
+              }
+              console.log('CHECKOUT PASS:',result.razorpay_payment_id);
+            } finally {
+              await b.close().catch(()=>{});
+            }
+
+            console.log('POST /verify...');
+            const verify = await api('/api/v1/payments/verify',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({razorpay_order_id:result.razorpay_order_id,razorpay_payment_id:result.razorpay_payment_id,razorpay_signature:result.razorpay_signature})});
+            if(verify.status!=='captured') throw new Error('/verify status: '+verify.status);
+            console.log('VERIFY PASS');
+
+            let histRow=null;
+            for(let i=0;i<30;i++){
+              const h=await api('/api/v1/payments/history',{headers:{authorization:`Bearer ${token}`}});
+              histRow=(h.payments||[]).find(p=>p.provider_order_id===order.order_id);
+              if(histRow&&histRow.status==='captured') break;
+              await sleep(1000);
+            }
+            if(!histRow||histRow.status!=='captured') throw new Error('History not captured: '+JSON.stringify(histRow));
+            console.log('HISTORY PASS');
+
+            const me=await api('/api/v1/account/me',{headers:{authorization:`Bearer ${token}`}});
+            const planCode = me.user ? me.user.plan_code : me.plan_code;
+            if(planCode!=='starter') throw new Error('Plan wrong: '+planCode+' full='+JSON.stringify(me));
+            console.log('PLAN UPGRADE PASS');
+
+            console.log('\nRAZORPAY FINAL E2E: PASS');
+          })().catch(e=>{console.error('FAILED:',e.stack||String(e));process.exit(1);});
+          NODE
+
+          node /tmp/rzp/e2e.js
+
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:

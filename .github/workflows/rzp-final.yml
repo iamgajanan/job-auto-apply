@@ -2,78 +2,68 @@ name: RZP Final Checkout
 on:
   workflow_dispatch:
   push:
-    branches:
-      - just-scrapping
+    branches: [just-scrapping]
     paths:
       - .github/workflows/rzp-final.yml
       - razorpay-e2e-runner.js
+
 jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       BASE_URL: https://jobs.n8npi.live
-      EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
-      PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
+      CI_TEST_USER_EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
+      CI_TEST_USER_PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
+
     steps:
-      - name: Health check
+      - name: Backend health check
         run: |
           for i in $(seq 1 20); do
-            code=$(curl -sS --http1.1 --max-time 10 -o /tmp/health -w '%{http_code}' "$BASE_URL/api/v1/health/database" || true)
+            code=$(curl -sS --http1.1 --max-time 10 -o /tmp/health -w '%{http_code}' \
+              "$BASE_URL/api/v1/health/database" || true)
             if [ "$code" = "200" ]; then cat /tmp/health; echo; exit 0; fi
-            echo "Health attempt $i: HTTP $code, retrying..."
+            echo "Health attempt $i: HTTP $code"
             sleep 3
           done
-          echo "Backend health check failed"
-          exit 1
+          echo "Backend unhealthy"; exit 1
+
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Pre-flight API check
+
+      - name: Install Playwright to /tmp (mirrors diagnostic workflow)
         run: |
-          set -e
-          echo "=== Checking env vars ==="
-          echo "BASE_URL: $BASE_URL"
-          [ -n "$EMAIL" ] && echo "EMAIL: SET (${EMAIL:0:3}***)" || echo "EMAIL: MISSING - FAIL"
-          [ -n "$PASSWORD" ] && echo "PASSWORD: SET" || echo "PASSWORD: MISSING - FAIL"
-          [ -z "$EMAIL" ] || [ -z "$PASSWORD" ] && exit 1 || true
-          
-          echo "=== Login test ==="
-          LOGIN_RESP=$(curl -sS --http1.1 --max-time 30 -w '\n%{http_code}' \
-            -X POST "$BASE_URL/api/v1/auth/login" \
-            -H "Content-Type: application/json" \
-            --data "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}")
-          LOGIN_CODE=$(echo "$LOGIN_RESP" | tail -1)
-          LOGIN_BODY=$(echo "$LOGIN_RESP" | head -n -1)
-          echo "Login HTTP: $LOGIN_CODE"
-          echo "Login body (truncated): ${LOGIN_BODY:0:200}"
-          [ "$LOGIN_CODE" = "200" ] || { echo "LOGIN FAILED"; exit 1; }
-          
-          TOKEN=$(echo "$LOGIN_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['session']['access_token'])")
-          echo "Token: ${TOKEN:0:20}..."
-          
-          echo "=== Order creation test ==="
-          ORDER_RESP=$(curl -sS --http1.1 --max-time 30 -w '\n%{http_code}' \
-            -X POST "$BASE_URL/api/v1/payments/orders" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            --data '{"plan_code":"starter"}')
-          ORDER_CODE=$(echo "$ORDER_RESP" | tail -1)
-          ORDER_BODY=$(echo "$ORDER_RESP" | head -n -1)
-          echo "Order HTTP: $ORDER_CODE"
-          echo "Order body: $ORDER_BODY"
-          [ "$ORDER_CODE" = "200" ] || { echo "ORDER CREATION FAILED"; exit 1; }
-          echo "PRE-FLIGHT: PASS"
-      - name: Install Node.js dependencies
-        run: |
+          cd /tmp
           npm init -y >/dev/null 2>&1
           npm install --no-save playwright@latest
           npx playwright install --with-deps chromium
+
+      - name: Start HTTP server for checkout page
+        run: |
+          mkdir -p /tmp/rzp
+          # Write a placeholder so the server starts cleanly
+          echo "<html><body>loading</body></html>" > /tmp/rzp/index.html
+          python3 -m http.server 4173 --directory /tmp/rzp \
+            >/tmp/rzp-server.log 2>&1 &
+          echo $! > /tmp/rzp-server.pid
+          sleep 1
+          curl -sf http://127.0.0.1:4173/index.html >/dev/null
+          echo "HTTP server running on port 4173"
+
       - name: Run Razorpay Final E2E
         run: node razorpay-e2e-runner.js
+
       - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: rzp-final-diagnostics
-          path: /tmp/rzp-*.png
+          path: /tmp/rzp/
           if-no-files-found: ignore
+
+      - name: Stop HTTP server
+        if: always()
+        run: |
+          if [ -f /tmp/rzp-server.pid ]; then
+            kill $(cat /tmp/rzp-server.pid) || true
+          fi
