@@ -1,7 +1,7 @@
 begin;
 
--- Seed an authenticated test identity without relying on the application auth flow.
--- The test only verifies table isolation, CRUD shape and row ownership through RLS.
+-- Seed authenticated test identities. The auth hardening trigger creates the
+-- matching public.profiles rows automatically.
 do $$
 declare
   u1 uuid := gen_random_uuid();
@@ -10,13 +10,8 @@ declare
 begin
   insert into auth.users (id, email, encrypted_password, email_confirmed_at, created_at, updated_at, raw_user_meta_data)
   values
-    (u1, 'saved-search-test-1@example.com', 'test', timezone('utc', now()), timezone('utc', now()), timezone('utc', now()), '{}'),
-    (u2, 'saved-search-test-2@example.com', 'test', timezone('utc', now()), timezone('utc', now()), timezone('utc', now()), '{}');
-
-  insert into public.profiles (id, email, full_name)
-  values
-    (u1, 'saved-search-test-1@example.com', 'Saved Search Test One'),
-    (u2, 'saved-search-test-2@example.com', 'Saved Search Test Two');
+    (u1, 'saved-search-test-1@example.com', 'test', timezone('utc', now()), timezone('utc', now()), timezone('utc', now()), '{"full_name":"Saved Search Test One"}'),
+    (u2, 'saved-search-test-2@example.com', 'test', timezone('utc', now()), timezone('utc', now()), timezone('utc', now()), '{"full_name":"Saved Search Test Two"}');
 
   insert into public.saved_searches (
     user_id, name, platform, job_title, location, experience,
@@ -56,7 +51,6 @@ begin
     raise exception 'saved search delete failed';
   end if;
 
-  delete from public.profiles where id in (u1, u2);
   delete from auth.users where id in (u1, u2);
 end $$;
 
