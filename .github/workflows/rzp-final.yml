@@ -22,48 +22,42 @@ jobs:
           for i in $(seq 1 20); do
             code=$(curl -sS --http1.1 --max-time 10 -o /tmp/health -w '%{http_code}' \
               "$BASE_URL/api/v1/health/database" || true)
-            if [ "$code" = "200" ]; then cat /tmp/health; echo; exit 0; fi
-            echo "Health attempt $i: HTTP $code"
-            sleep 3
+            [ "$code" = "200" ] && cat /tmp/health && echo && exit 0
+            echo "Health $i: HTTP $code"; sleep 3
           done
           echo "Backend unhealthy"; exit 1
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Playwright to /tmp (mirrors diagnostic workflow)
+      - name: Install Playwright to /tmp
         run: |
           cd /tmp
           npm init -y >/dev/null 2>&1
           npm install --no-save playwright@latest
           npx playwright install --with-deps chromium
 
-      - name: Start HTTP server for checkout page
+      - name: Start HTTP server (serves /tmp/rzp for checkout page)
         run: |
           mkdir -p /tmp/rzp
-          # Write a placeholder so the server starts cleanly
-          echo "<html><body>loading</body></html>" > /tmp/rzp/index.html
-          python3 -m http.server 4173 --directory /tmp/rzp \
-            >/tmp/rzp-server.log 2>&1 &
+          echo "<html><body>ready</body></html>" > /tmp/rzp/index.html
+          cd /tmp/rzp
+          python3 -m http.server 4173 >/tmp/rzp-server.log 2>&1 &
           echo $! > /tmp/rzp-server.pid
-          sleep 1
-          curl -sf http://127.0.0.1:4173/index.html >/dev/null
-          echo "HTTP server running on port 4173"
+          sleep 2
+          curl -sf http://127.0.0.1:4173/index.html >/dev/null && echo "HTTP server OK on port 4173"
 
       - name: Run Razorpay Final E2E
         run: node razorpay-e2e-runner.js
 
-      - name: Upload diagnostics on failure
+      - name: Upload screenshots on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: rzp-final-diagnostics
-          path: /tmp/rzp/
+          name: rzp-final-screenshots
+          path: /tmp/rzp/*.png
           if-no-files-found: ignore
 
       - name: Stop HTTP server
         if: always()
-        run: |
-          if [ -f /tmp/rzp-server.pid ]; then
-            kill $(cat /tmp/rzp-server.pid) || true
-          fi
+        run: kill $(cat /tmp/rzp-server.pid 2>/dev/null) 2>/dev/null || true
