@@ -1,6 +1,6 @@
 begin;
 
-select plan(11);
+select plan(10);
 
 select has_table('public', 'saved_searches', 'saved_searches table exists');
 select has_column('public', 'saved_searches', 'user_id', 'saved_searches.user_id exists');
@@ -23,7 +23,11 @@ begin
 end $$;
 
 set local role authenticated;
-select set_config('request.jwt.claim.sub', current_setting('test.saved_search_user_1'), true);
+do $$
+begin
+  perform set_config('request.jwt.claim.sub', current_setting('test.saved_search_user_1'), true);
+end $$;
+
 select lives_ok($sql$
   insert into public.saved_searches (
     user_id, name, platform, job_title, location, experience,
@@ -55,14 +59,22 @@ select is(
   'updated saved search is visible to its owner'
 );
 
-select set_config('request.jwt.claim.sub', current_setting('test.saved_search_user_2'), true);
+do $$
+begin
+  perform set_config('request.jwt.claim.sub', current_setting('test.saved_search_user_2'), true);
+end $$;
+
 select is(
   (select count(*) from public.saved_searches),
   0::bigint,
   'user cannot read another user saved search'
 );
 
-select set_config('request.jwt.claim.sub', current_setting('test.saved_search_user_1'), true);
+do $$
+begin
+  perform set_config('request.jwt.claim.sub', current_setting('test.saved_search_user_1'), true);
+end $$;
+
 select lives_ok($sql$
   delete from public.saved_searches
   where user_id = current_setting('test.saved_search_user_1')::uuid
