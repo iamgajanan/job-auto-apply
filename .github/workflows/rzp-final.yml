@@ -30,6 +30,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify secrets and API reachable
+        run: |
+          echo "EMAIL set: $([ -n "$CI_TEST_USER_EMAIL" ] && echo YES || echo NO)"
+          echo "PASS set:  $([ -n "$CI_TEST_USER_PASSWORD" ] && echo YES || echo NO)"
+          [ -n "$CI_TEST_USER_EMAIL" ] && [ -n "$CI_TEST_USER_PASSWORD" ] || { echo "SECRETS MISSING"; exit 1; }
+
+          code=$(curl -sS --http1.1 --max-time 30 -o /tmp/login.json -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/auth/login" \
+            -H 'Content-Type: application/json' \
+            --data "{\"email\":\"$CI_TEST_USER_EMAIL\",\"password\":\"$CI_TEST_USER_PASSWORD\"}")
+          echo "Login HTTP: $code"
+          [ "$code" = "200" ] || { cat /tmp/login.json; exit 1; }
+
+          TOKEN=$(python3 -c "import json; print(json.load(open('/tmp/login.json'))['session']['access_token'])")
+          echo "Token obtained: ${TOKEN:0:20}..."
+
+          code=$(curl -sS --http1.1 --max-time 30 -o /tmp/order.json -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/payments/orders" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"plan_code":"starter"}')
+          echo "Order HTTP: $code  body: $(cat /tmp/order.json)"
+          [ "$code" = "200" ] || exit 1
+
+          wh_code=$(curl -sS --http1.1 --max-time 30 -o /tmp/wh.json -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/payments/webhook" \
+            -H 'Content-Type: application/json' \
+            -H 'X-Razorpay-Signature: bad-sig-preflight' \
+            --data '{"id":"preflight-bad","event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_bad","order_id":"order_bad"}}}}')
+          echo "Webhook HTTP: $wh_code  body: $(cat /tmp/wh.json)"
+          [ "$wh_code" = "400" ] || [ "$wh_code" = "503" ] || { echo "Unexpected webhook code $wh_code"; exit 1; }
+          echo "All pre-flight checks passed"
+
       - name: Install Playwright to /tmp
         run: |
           cd /tmp
