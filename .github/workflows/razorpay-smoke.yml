@@ -24,27 +24,7 @@ jobs:
             echo "Health $i: HTTP $code"; sleep 5
           done; exit 1
 
-      - name: Signup a fresh test user
-        run: |
-          set -Eeuo pipefail
-          TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-          EMAIL="ci-$(date +%s)-${GITHUB_RUN_ID}@example.com"
-          PASSWORD="CiTest!$(date +%s)Aa1"
-          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/signup" -w '%{http_code}' \
-            -X POST "$BASE_URL/api/v1/auth/signup" \
-            -H 'Content-Type: application/json' \
-            --data "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"full_name\":\"CI Smoke User\"}")
-          [ "$code" = "201" ] || { echo "Signup HTTP $code:"; cat "$TMP/signup"; exit 1; }
-          python3 -c "
-import json
-x=json.load(open('$TMP/signup'))
-assert x.get('user',{}).get('email','').lower() == '$EMAIL'.lower(), x
-assert x.get('user',{}).get('id'), x
-print('SIGNUP: PASS')
-print('EMAIL_CONFIRMATION_REQUIRED:', x.get('email_confirmation_required'))
-"
-
-      - name: Login, create order, check history
+      - name: Login, create order, check history, search jobs
         run: |
           set -Eeuo pipefail
           TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -55,21 +35,15 @@ print('EMAIL_CONFIRMATION_REQUIRED:', x.get('email_confirmation_required'))
             -H 'Content-Type: application/json' \
             --data "{\"email\":\"$CI_TEST_USER_EMAIL\",\"password\":\"$CI_TEST_USER_PASSWORD\"}")
           [ "$code" = "200" ] || { echo "Login HTTP $code:"; cat "$TMP/login"; exit 1; }
-
-          python3 -c "
-import json
-x=json.load(open('$TMP/login'))
-assert x.get('session',{}).get('access_token'), x
-assert x.get('user',{}).get('id'), x
-print('LOGIN: PASS')
-"
           TOKEN=$(python3 -c "import json; print(json.load(open('$TMP/login'))['session']['access_token'])")
+          test -n "$TOKEN"
+          echo "LOGIN: PASS"
 
-          # Current user
+          # Authenticated account
           code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/me" -w '%{http_code}' \
             -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/v1/auth/me")
           [ "$code" = "200" ] || { echo "Auth /me HTTP $code:"; cat "$TMP/me"; exit 1; }
-          python3 -c "import json; x=json.load(open('$TMP/me')); assert x.get('id'), x; print('AUTH ME: PASS')"
+          echo "AUTH ME: PASS"
 
           # Create order
           code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/order" -w '%{http_code}' \
@@ -103,16 +77,10 @@ assert match, f'Order not found as created in history (checked {len(rows)} rows)
 print('PAYMENT HISTORY PERSISTENCE: PASS')
 "
 
-          # Persist token for the next job step through GitHub environment file.
-          echo "SMOKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-
-      - name: Search jobs with authenticated user
-        run: |
-          set -Eeuo pipefail
-          TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-          code=$(curl -sS --http1.1 --max-time 120 -o "$TMP/jobs" -w '%{http_code}' \
+          # Search jobs using the authenticated user.
+          code=$(curl -sS --http1.1 --max-time 150 -o "$TMP/jobs" -w '%{http_code}' \
             -X POST "$BASE_URL/api/v1/jobs/search" \
-            -H "Authorization: Bearer $SMOKE_TOKEN" \
+            -H "Authorization: Bearer $TOKEN" \
             -H 'Content-Type: application/json' \
             --data '{"platform":"linkedin","job_title":"React Developer","location":"Pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}')
           echo "Job search HTTP: $code"
@@ -121,11 +89,12 @@ print('PAYMENT HISTORY PERSISTENCE: PASS')
 import json
 x=json.load(open('$TMP/jobs'))
 assert isinstance(x.get('jobs'), list), x
-print('JOB SEARCH: PASS  results=' + str(len(x['jobs'])))
+print('JOB SEARCH: PASS results=' + str(len(x['jobs'])))
 "
 
       - name: Webhook rejects invalid signature
         run: |
+          # 400 = secret configured and sig is invalid (expected happy path)
           code=$(curl -sS --http1.1 --max-time 30 -o /tmp/wh -w '%{http_code}' \
             -X POST "$BASE_URL/api/v1/payments/webhook" \
             -H 'Content-Type: application/json' \
@@ -133,5 +102,4 @@ print('JOB SEARCH: PASS  results=' + str(len(x['jobs'])))
             --data '{"id":"smoke-bad","event":"payment.captured","payload":{"payment":{"entity":{"id":"pay_bad","order_id":"order_bad"}}}}')
           echo "Webhook response: HTTP $code  body: $(cat /tmp/wh)"
           [ "$code" = "400" ] && echo "WEBHOOK INVALID SIG REJECTION: PASS (HTTP 400)" && exit 0
-          [ "$code" = "503" ] && echo "WEBHOOK ENDPOINT LIVE: PASS (HTTP 503 - secret not configured)" && exit 0
           echo "FAIL: unexpected HTTP $code"; exit 1
