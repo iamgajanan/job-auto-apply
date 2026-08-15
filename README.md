@@ -31,7 +31,7 @@ Production-ready AI-powered Job Auto Apply System.
 - GitHub Actions backend deployment
 - Raspberry Pi self-hosted ARM64 runner deployment
 - systemd FastAPI service on Raspberry Pi
-- Cloudflare Tunnel exposure at `https://jobs.n8npi.live`
+- Cloudflare Tunnel exposure at `https://jobs`
 - Backend/public health checks and authenticated smoke tests
 - Razorpay backend smoke tests
 
@@ -76,7 +76,7 @@ Raspberry Pi 5 (ARM64)
         |
         +--> cloudflared-n8n.service
                 |
-                +--> jobs.n8npi.live
+                +--> jobs
 ```
 
 ### Runtime locations
@@ -108,7 +108,7 @@ FastAPI runtime port on the Pi:
 Public backend:
 
 ```text
-https://jobs.n8npi.live
+https://jobs
 ```
 
 ---
@@ -322,7 +322,7 @@ This was intentional because the Raspberry Pi runtime had issues with SDK initia
 Base URL:
 
 ```text
-https://jobs.n8npi.live/api/v1
+https://jobs/api/v1
 ```
 
 #### Signup
@@ -707,7 +707,7 @@ Response contains payment ID, plan, provider order/payment IDs, amount, currency
 Razorpay sends webhooks to:
 
 ```text
-https://jobs.n8npi.live/api/v1/payments/webhook
+https://jobs/api/v1/payments/webhook
 ```
 
 Configured events:
@@ -937,7 +937,7 @@ The public backend is exposed through Cloudflare Tunnel.
 Current public hostname:
 
 ```text
-jobs.n8npi.live
+jobs
 ```
 
 The deployment workflow restarts the existing service:
@@ -949,8 +949,8 @@ cloudflared-n8n.service
 After backend restart it verifies:
 
 ```bash
-curl --http1.1 https://jobs.n8npi.live/
-curl --http1.1 https://jobs.n8npi.live/api/v1/health/database
+curl --http1.1 https://jobs/
+curl --http1.1 https://jobs/api/v1/health/database
 ```
 
 ### Important
@@ -1300,7 +1300,7 @@ IMPORTANT ARCHITECTURE:
 - FastAPI production port:
   8004
 - Public backend:
-  https://jobs.n8npi.live
+  https://jobs
 - Cloudflare service currently used by deployment:
   cloudflared-n8n.service
 - GitHub Actions deploy workflow:
