@@ -5,6 +5,7 @@ from app.auth.schemas import CurrentUser
 from app.features.saved_searches.schemas import (
     CreateSavedSearchRequest,
     SavedSearch,
+    SavedSearchAlertJob,
     SavedSearchAlertStatus,
     UpdateSavedSearchRequest,
 )
@@ -32,6 +33,15 @@ def get_alert_status(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     return saved_search_service.alert_status(current_user.id, saved_search_id)
+
+
+@router.get("/{saved_search_id}/alert-jobs", response_model=list[SavedSearchAlertJob])
+def get_alert_jobs(
+    saved_search_id: str,
+    limit: int = 50,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return saved_search_service.alert_jobs(current_user.id, saved_search_id, limit)
 
 
 @router.post("", response_model=SavedSearch, status_code=status.HTTP_201_CREATED)
