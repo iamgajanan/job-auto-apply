@@ -48,5 +48,5 @@ jobs:
           BACKEND_HOST: 0.0.0.0
           BACKEND_PORT: 8004
           DATABASE_URL: ""
-        run: python -m pytest -q test_alert_scheduler.py
+        run: python -m unittest test_alert_scheduler.py
         working-directory: backend
