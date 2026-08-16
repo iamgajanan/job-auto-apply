@@ -36,7 +36,17 @@ class AlertRun(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    new_jobs_count: int = 0
+    result_summary: dict | None = None
     error_message: str | None
+
+
+class SavedSearchAlertJob(BaseModel):
+    id: str
+    fingerprint: str
+    job_data: dict
+    first_seen_at: datetime
+    last_seen_at: datetime
 
 
 class SavedSearchAlertStatus(BaseModel):
