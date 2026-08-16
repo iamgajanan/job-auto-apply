@@ -10,31 +10,30 @@ from app.db.connection import get_engine
 from app.features.saved_searches.schemas import CreateSavedSearchRequest, UpdateSavedSearchRequest
 
 
+SELECT_FIELDS = """
+    id::text,
+    name,
+    platform,
+    job_title,
+    location,
+    experience,
+    work_mode,
+    posted_within,
+    easy_apply,
+    alert_enabled,
+    alert_frequency,
+    alert_next_run_at,
+    alert_last_run_at,
+    created_at,
+    updated_at
+"""
+
+
 class SavedSearchService:
     def list(self, user_id: str) -> list[dict[str, Any]]:
         with get_engine().connect() as connection:
             rows = connection.execute(
-                text(
-                    """
-                    select
-                        id::text,
-                        name,
-                        platform,
-                        job_title,
-                        location,
-                        experience,
-                        work_mode,
-                        posted_within,
-                        easy_apply,
-                        alert_enabled,
-                        alert_frequency,
-                        created_at,
-                        updated_at
-                    from public.saved_searches
-                    where user_id = :user_id
-                    order by updated_at desc
-                    """
-                ),
+                text(f"select {SELECT_FIELDS} from public.saved_searches where user_id = :user_id order by updated_at desc"),
                 {"user_id": user_id},
             ).mappings().all()
         return [dict(row) for row in rows]
@@ -47,26 +46,7 @@ class SavedSearchService:
 
         with get_engine().connect() as connection:
             row = connection.execute(
-                text(
-                    """
-                    select
-                        id::text,
-                        name,
-                        platform,
-                        job_title,
-                        location,
-                        experience,
-                        work_mode,
-                        posted_within,
-                        easy_apply,
-                        alert_enabled,
-                        alert_frequency,
-                        created_at,
-                        updated_at
-                    from public.saved_searches
-                    where id = :id and user_id = :user_id
-                    """
-                ),
+                text(f"select {SELECT_FIELDS} from public.saved_searches where id = :id and user_id = :user_id"),
                 {"id": saved_search_id, "user_id": user_id},
             ).mappings().one_or_none()
 
@@ -78,87 +58,51 @@ class SavedSearchService:
         with get_engine().begin() as connection:
             row = connection.execute(
                 text(
-                    """
+                    f"""
                     insert into public.saved_searches (
-                        user_id,
-                        name,
-                        platform,
-                        job_title,
-                        location,
-                        experience,
-                        work_mode,
-                        posted_within,
-                        easy_apply,
-                        alert_enabled,
-                        alert_frequency
+                        user_id, name, platform, job_title, location, experience,
+                        work_mode, posted_within, easy_apply, alert_enabled, alert_frequency
                     ) values (
-                        :user_id,
-                        :name,
-                        :platform,
-                        :job_title,
-                        :location,
-                        :experience,
-                        :work_mode,
-                        :posted_within,
-                        :easy_apply,
-                        :alert_enabled,
-                        :alert_frequency
-                    )
-                    returning
-                        id::text,
-                        name,
-                        platform,
-                        job_title,
-                        location,
-                        experience,
-                        work_mode,
-                        posted_within,
-                        easy_apply,
-                        alert_enabled,
-                        alert_frequency,
-                        created_at,
-                        updated_at
+                        :user_id, :name, :platform, :job_title, :location, :experience,
+                        :work_mode, :posted_within, :easy_apply, :alert_enabled, :alert_frequency
+                    ) returning {SELECT_FIELDS}
                     """
                 ),
                 {"user_id": user_id, **request.model_dump()},
             ).mappings().one()
         return dict(row)
 
-    def update(
-        self,
-        user_id: str,
-        saved_search_id: str,
-        request: UpdateSavedSearchRequest,
-    ) -> dict[str, Any]:
-        # Validate the UUID and ownership before attempting the update so that
-        # malformed IDs and edits to another user's search consistently return 404.
+    def update(self, user_id: str, saved_search_id: str, request: UpdateSavedSearchRequest) -> dict[str, Any]:
         self.get(user_id, saved_search_id)
         values = request.model_dump(exclude_unset=True)
         if not values:
             return self.get(user_id, saved_search_id)
 
-        # Keep the update statement explicit instead of dynamically interpolating
-        # request field names. This makes the update path deterministic and avoids
-        # SQL generation surprises when the request model evolves.
         allowed = {
-            "name",
-            "platform",
-            "job_title",
-            "location",
-            "experience",
-            "work_mode",
-            "posted_within",
-            "easy_apply",
-            "alert_enabled",
-            "alert_frequency",
+            "name", "platform", "job_title", "location", "experience", "work_mode",
+            "posted_within", "easy_apply", "alert_enabled", "alert_frequency",
         }
         values = {key: value for key, value in values.items() if key in allowed}
         if not values:
             return self.get(user_id, saved_search_id)
 
+        # Changing alert settings must not leave a stale schedule behind.
+        if values.get("alert_enabled") is False:
+            values["alert_next_run_at"] = None
+        elif values.get("alert_enabled") is True and not values.get("alert_frequency"):
+            current = self.get(user_id, saved_search_id)
+            values["alert_frequency"] = current.get("alert_frequency") or "daily"
+            values["alert_next_run_at"] = None
+        elif values.get("alert_frequency") is not None:
+            values["alert_next_run_at"] = None
+
         params: dict[str, Any] = {"id": saved_search_id, "user_id": user_id}
         assignments: list[str] = []
         for key, value in values.items():
+            if key == "alert_next_run_at":
+                assignments.append("alert_next_run_at = :alert_next_run_at")
+                params[key] = value
+                continue
             param = f"value_{key}"
             assignments.append(f"{key} = :{param}")
             params[param] = value
@@ -167,22 +111,8 @@ class SavedSearchService:
             update public.saved_searches
             set {', '.join(assignments)}, updated_at = timezone('utc', now())
             where id = :id and user_id = :user_id
-            returning
-                id::text,
-                name,
-                platform,
-                job_title,
-                location,
-                experience,
-                work_mode,
-                posted_within,
-                easy_apply,
-                alert_enabled,
-                alert_frequency,
-                created_at,
-                updated_at
+            returning {SELECT_FIELDS}
         """
-
         try:
             with get_engine().begin() as connection:
                 row = connection.execute(text(sql), params).mappings().one_or_none()
@@ -201,13 +131,35 @@ class SavedSearchService:
 
         with get_engine().begin() as connection:
             result = connection.execute(
-                text(
-                    "delete from public.saved_searches where id = :id and user_id = :user_id"
-                ),
+                text("delete from public.saved_searches where id = :id and user_id = :user_id"),
                 {"id": saved_search_id, "user_id": user_id},
             )
         if result.rowcount != 1:
             raise HTTPException(status_code=404, detail="Saved search not found")
+
+    def alert_status(self, user_id: str, saved_search_id: str) -> dict[str, Any]:
+        saved_search = self.get(user_id, saved_search_id)
+        with get_engine().connect() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    select id::text, scheduled_for, status, created_at, started_at, completed_at, error_message
+                    from public.saved_search_alert_runs
+                    where saved_search_id = :saved_search_id and user_id = :user_id
+                    order by created_at desc
+                    limit 10
+                    """
+                ),
+                {"saved_search_id": saved_search_id, "user_id": user_id},
+            ).mappings().all()
+        return {
+            "saved_search_id": saved_search_id,
+            "alert_enabled": saved_search["alert_enabled"],
+            "alert_frequency": saved_search["alert_frequency"],
+            "next_run_at": saved_search["alert_next_run_at"],
+            "last_run_at": saved_search["alert_last_run_at"],
+            "recent_runs": [dict(row) for row in rows],
+        }
 
 
 saved_search_service = SavedSearchService()
