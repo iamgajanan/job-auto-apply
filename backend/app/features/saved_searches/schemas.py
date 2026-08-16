@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 Platform = Literal["linkedin", "naukri"]
 WorkMode = Literal["remote", "onsite", "hybrid", "any"]
 AlertFrequency = Literal["daily", "weekly"]
+AlertRunStatus = Literal["queued", "running", "completed", "failed", "skipped"]
 
 
 class SavedSearch(BaseModel):
@@ -22,8 +23,29 @@ class SavedSearch(BaseModel):
     easy_apply: bool
     alert_enabled: bool
     alert_frequency: AlertFrequency | None
+    alert_next_run_at: datetime | None
+    alert_last_run_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class AlertRun(BaseModel):
+    id: str
+    scheduled_for: datetime
+    status: AlertRunStatus
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
+
+
+class SavedSearchAlertStatus(BaseModel):
+    saved_search_id: str
+    alert_enabled: bool
+    alert_frequency: AlertFrequency | None
+    next_run_at: datetime | None
+    last_run_at: datetime | None
+    recent_runs: list[AlertRun]
 
 
 class CreateSavedSearchRequest(BaseModel):
