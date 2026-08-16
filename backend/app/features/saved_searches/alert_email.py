@@ -6,9 +6,9 @@ import os
 from typing import Any
 
 import httpx
+from sqlalchemy import text
 
 from app.db.connection import get_engine
-from sqlalchemy import text
 
 LOGGER = logging.getLogger("job_alert_email")
 RESEND_URL = "https://api.resend.com/emails"
@@ -52,45 +52,59 @@ def _render_email(search_name: str, jobs: list[dict[str, Any]]) -> tuple[str, st
 
 def _load_pending_delivery() -> dict[str, Any] | None:
     with get_engine().begin() as connection:
-        row = connection.execute(
+        delivery = connection.execute(
             text(
                 """
                 select d.id, d.alert_run_id, d.attempts,
                        r.saved_search_id, r.user_id,
                        s.name as search_name,
-                       coalesce(u.email, p.email) as email,
-                       coalesce(
-                         jsonb_agg(j.job_data order by j.first_seen_at desc)
-                         filter (where j.id is not null), '[]'::jsonb
-                       ) as jobs
+                       coalesce(u.email, p.email) as email
                 from public.saved_search_alert_email_deliveries d
                 join public.saved_search_alert_runs r on r.id = d.alert_run_id
                 join public.saved_searches s on s.id = r.saved_search_id
                 left join auth.users u on u.id = r.user_id
                 left join public.profiles p on p.id = r.user_id
-                left join public.saved_search_alert_jobs j
-                  on j.saved_search_id = r.saved_search_id
-                 and j.first_seen_at >= coalesce(r.started_at, r.created_at)
                 where d.status = 'queued'
-                group by d.id, d.alert_run_id, d.attempts, r.saved_search_id,
-                         r.user_id, s.name, u.email, p.email
                 order by d.created_at
                 for update of d skip locked
                 limit 1
                 """
             )
         ).mappings().first()
-        if not row:
+        if not delivery:
             return None
+
+        jobs = connection.execute(
+            text(
+                """
+                select job_data
+                from public.saved_search_alert_jobs
+                where saved_search_id = :saved_search_id
+                  and first_seen_at >= (
+                      select coalesce(started_at, created_at)
+                      from public.saved_search_alert_runs
+                      where id = :alert_run_id
+                  )
+                order by first_seen_at desc
+                """
+            ),
+            {
+                "saved_search_id": delivery["saved_search_id"],
+                "alert_run_id": delivery["alert_run_id"],
+            },
+        ).mappings().all()
+
         connection.execute(
             text(
                 "update public.saved_search_alert_email_deliveries "
                 "set status = 'sending', attempts = attempts + 1, started_at = timezone('utc', now()) "
                 "where id = :id"
             ),
-            {"id": row["id"]},
+            {"id": delivery["id"]},
         )
-        return dict(row)
+        result = dict(delivery)
+        result["jobs"] = [row["job_data"] for row in jobs]
+        return result
 
 
 def _send_via_resend(to_email: str, subject: str, html_body: str) -> str:
@@ -125,6 +139,7 @@ def deliver_one_email() -> int:
                     """
                     update public.saved_search_alert_email_deliveries
                     set status = 'sent', sent_at = timezone('utc', now()),
+                        completed_at = timezone('utc', now()),
                         provider_message_id = :provider_message_id, error_message = null
                     where id = :id
                     """
@@ -133,7 +148,7 @@ def deliver_one_email() -> int:
             )
             connection.execute(
                 text(
-                    "update public.saved_search_alert_runs set email_status = 'sent' where id = :run_id"
+                    "update public.saved_search_alert_runs set email_status = 'sent', email_error = null where id = :run_id"
                 ),
                 {"run_id": delivery["alert_run_id"]},
             )
@@ -146,8 +161,8 @@ def deliver_one_email() -> int:
                     """
                     update public.saved_search_alert_email_deliveries
                     set status = case when attempts >= 3 then 'failed' else 'queued' end,
-                        error_message = :error_message, completed_at =
-                        case when attempts >= 3 then timezone('utc', now()) else completed_at end
+                        error_message = :error_message,
+                        completed_at = case when attempts >= 3 then timezone('utc', now()) else completed_at end
                     where id = :id
                     """
                 ),
