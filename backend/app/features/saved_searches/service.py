@@ -130,15 +130,36 @@ class SavedSearchService:
         saved_search_id: str,
         request: UpdateSavedSearchRequest,
     ) -> dict[str, Any]:
+        # Validate the UUID and ownership before attempting the update so that
+        # malformed IDs and edits to another user's search consistently return 404.
         self.get(user_id, saved_search_id)
         values = request.model_dump(exclude_unset=True)
         if not values:
             return self.get(user_id, saved_search_id)
 
-        assignments = []
+        # Keep the update statement explicit instead of dynamically interpolating
+        # request field names. This makes the update path deterministic and avoids
+        # SQL generation surprises when the request model evolves.
+        allowed = {
+            "name",
+            "platform",
+            "job_title",
+            "location",
+            "experience",
+            "work_mode",
+            "posted_within",
+            "easy_apply",
+            "alert_enabled",
+            "alert_frequency",
+        }
+        values = {key: value for key, value in values.items() if key in allowed}
+        if not values:
+            return self.get(user_id, saved_search_id)
+
         params: dict[str, Any] = {"id": saved_search_id, "user_id": user_id}
-        for index, (key, value) in enumerate(values.items()):
-            param = f"v{index}"
+        assignments: list[str] = []
+        for key, value in values.items():
+            param = f"value_{key}"
             assignments.append(f"{key} = :{param}")
             params[param] = value
 
@@ -161,8 +182,12 @@ class SavedSearchService:
                 created_at,
                 updated_at
         """
-        with get_engine().begin() as connection:
-            row = connection.execute(text(sql), params).mappings().one_or_none()
+
+        try:
+            with get_engine().begin() as connection:
+                row = connection.execute(text(sql), params).mappings().one_or_none()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Unable to update saved search.") from exc
 
         if not row:
             raise HTTPException(status_code=404, detail="Saved search not found")
