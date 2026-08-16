@@ -72,10 +72,10 @@ class SavedSearchService:
         return dict(row)
 
     def update(self, user_id: str, saved_search_id: str, request: UpdateSavedSearchRequest) -> dict[str, Any]:
-        self.get(user_id, saved_search_id)
+        current = self.get(user_id, saved_search_id)
         values = request.model_dump(exclude_unset=True)
         if not values:
-            return self.get(user_id, saved_search_id)
+            return current
 
         allowed = {
             "name", "platform", "job_title", "location", "experience", "work_mode",
@@ -83,16 +83,28 @@ class SavedSearchService:
         }
         values = {key: value for key, value in values.items() if key in allowed}
         if not values:
-            return self.get(user_id, saved_search_id)
+            return current
+
+        criteria_fields = {
+            "platform", "job_title", "location", "experience",
+            "work_mode", "posted_within", "easy_apply",
+        }
+        criteria_changed = any(
+            key in values and values[key] != current.get(key)
+            for key in criteria_fields
+        )
 
         if values.get("alert_enabled") is False:
             values["alert_next_run_at"] = None
         elif values.get("alert_enabled") is True and not values.get("alert_frequency"):
-            current = self.get(user_id, saved_search_id)
             values["alert_frequency"] = current.get("alert_frequency") or "daily"
             values["alert_next_run_at"] = None
         elif values.get("alert_frequency") is not None:
             values["alert_next_run_at"] = None
+
+        if criteria_changed:
+            values["alert_next_run_at"] = None
+            values["alert_last_run_at"] = None
 
         params: dict[str, Any] = {"id": saved_search_id, "user_id": user_id}
         assignments: list[str] = []
@@ -110,6 +122,16 @@ class SavedSearchService:
         try:
             with get_engine().begin() as connection:
                 row = connection.execute(text(sql), params).mappings().one_or_none()
+                if row and criteria_changed:
+                    connection.execute(
+                        text(
+                            """
+                            delete from public.saved_search_alert_jobs
+                            where saved_search_id = :saved_search_id and user_id = :user_id
+                            """
+                        ),
+                        {"saved_search_id": saved_search_id, "user_id": user_id},
+                    )
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Unable to update saved search.") from exc
 
