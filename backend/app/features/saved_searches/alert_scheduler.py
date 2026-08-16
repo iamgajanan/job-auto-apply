@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from app.db.connection import get_engine
+from app.features.saved_searches.alert_executor import process_queued_alerts
 
 LOGGER = logging.getLogger("job_alert_scheduler")
 IST = ZoneInfo("Asia/Kolkata")
@@ -117,7 +118,13 @@ def dispatch_due_alerts() -> int:
 def run_once() -> int:
     initialized = initialize_missing_schedules()
     dispatched = dispatch_due_alerts()
-    LOGGER.info("scheduler tick: initialized=%s dispatched=%s", initialized, dispatched)
+    processed = process_queued_alerts(max_runs=5)
+    LOGGER.info(
+        "scheduler tick: initialized=%s dispatched=%s processed=%s",
+        initialized,
+        dispatched,
+        processed,
+    )
     return dispatched
 
 
