@@ -9,7 +9,6 @@ from sqlalchemy import text
 from app.db.connection import get_engine
 from app.features.saved_searches.schemas import CreateSavedSearchRequest, UpdateSavedSearchRequest
 
-
 SELECT_FIELDS = """
     id::text,
     name,
@@ -86,7 +85,6 @@ class SavedSearchService:
         if not values:
             return self.get(user_id, saved_search_id)
 
-        # Changing alert settings must not leave a stale schedule behind.
         if values.get("alert_enabled") is False:
             values["alert_next_run_at"] = None
         elif values.get("alert_enabled") is True and not values.get("alert_frequency"):
@@ -99,10 +97,6 @@ class SavedSearchService:
         params: dict[str, Any] = {"id": saved_search_id, "user_id": user_id}
         assignments: list[str] = []
         for key, value in values.items():
-            if key == "alert_next_run_at":
-                assignments.append("alert_next_run_at = :alert_next_run_at")
-                params[key] = value
-                continue
             param = f"value_{key}"
             assignments.append(f"{key} = :{param}")
             params[param] = value
@@ -143,7 +137,8 @@ class SavedSearchService:
             rows = connection.execute(
                 text(
                     """
-                    select id::text, scheduled_for, status, created_at, started_at, completed_at, error_message
+                    select id::text, scheduled_for, status, created_at, started_at,
+                           completed_at, new_jobs_count, result_summary, error_message
                     from public.saved_search_alert_runs
                     where saved_search_id = :saved_search_id and user_id = :user_id
                     order by created_at desc
@@ -160,6 +155,24 @@ class SavedSearchService:
             "last_run_at": saved_search["alert_last_run_at"],
             "recent_runs": [dict(row) for row in rows],
         }
+
+    def alert_jobs(self, user_id: str, saved_search_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        self.get(user_id, saved_search_id)
+        safe_limit = min(max(limit, 1), 100)
+        with get_engine().connect() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    select id::text, fingerprint, job_data, first_seen_at, last_seen_at
+                    from public.saved_search_alert_jobs
+                    where saved_search_id = :saved_search_id and user_id = :user_id
+                    order by first_seen_at desc
+                    limit :limit
+                    """
+                ),
+                {"saved_search_id": saved_search_id, "user_id": user_id, "limit": safe_limit},
+            ).mappings().all()
+        return [dict(row) for row in rows]
 
 
 saved_search_service = SavedSearchService()
