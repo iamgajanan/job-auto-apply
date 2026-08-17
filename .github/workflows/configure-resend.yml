@@ -1,0 +1,67 @@
+name: Configure Resend on Raspberry Pi
+
+on:
+  workflow_run:
+    workflows: ["Deploy Backend to Raspberry Pi"]
+    types: [completed]
+
+concurrency:
+  group: job-auto-apply-resend-config
+  cancel-in-progress: true
+
+jobs:
+  configure:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: [self-hosted, linux, arm64]
+    steps:
+      - name: Configure Resend environment
+        shell: bash
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+        run: |
+          set -Eeuo pipefail
+
+          APP_DIR=/home/iamgajanan/Projects/job-auto-apply
+          ENV_FILE="$APP_DIR/.env"
+
+          test -n "$RESEND_API_KEY"
+          test -n "$RESEND_FROM_EMAIL"
+          test -d "$APP_DIR"
+
+          RESEND_API_KEY="$RESEND_API_KEY" RESEND_FROM_EMAIL="$RESEND_FROM_EMAIL" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          p = Path('/home/iamgajanan/Projects/job-auto-apply/.env')
+          lines = p.read_text().splitlines() if p.exists() else []
+          managed = {
+              'RESEND_API_KEY': os.environ['RESEND_API_KEY'],
+              'RESEND_FROM_EMAIL': os.environ['RESEND_FROM_EMAIL'],
+          }
+          lines = [line for line in lines if line.split('=', 1)[0] not in managed]
+          lines += [f'{key}={value}' for key, value in managed.items()]
+          p.write_text('\n'.join(lines) + '\n')
+          p.chmod(0o600)
+          PY
+
+          test -s "$ENV_FILE"
+          grep -q '^RESEND_FROM_EMAIL=.' "$ENV_FILE"
+          grep -q '^RESEND_API_KEY=.' "$ENV_FILE"
+
+          sudo -n systemctl restart job-auto-apply.service
+          sudo -n systemctl is-active --quiet job-auto-apply.service
+
+          for i in {1..30}; do
+            if curl -fsS --max-time 3 http://127.0.0.1:8004/ >/tmp/job-health.json; then
+              break
+            fi
+            [ "$i" -lt 30 ] || {
+              sudo -n systemctl status job-auto-apply.service --no-pager || true
+              sudo -n journalctl -u job-auto-apply.service -n 80 --no-pager || true
+              exit 1
+            }
+            sleep 2
+          done
+
+          echo "Resend environment configured and backend restarted successfully."
