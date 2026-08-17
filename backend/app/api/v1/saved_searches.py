@@ -44,6 +44,18 @@ def get_alert_jobs(
     return saved_search_service.alert_jobs(current_user.id, saved_search_id, limit)
 
 
+@router.post("/{saved_search_id}/alert-test", status_code=status.HTTP_202_ACCEPTED)
+def queue_test_alert(
+    saved_search_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    run = saved_search_service.queue_test_alert(current_user.id, saved_search_id)
+    return {
+        "message": "Test alert queued. It will run automatically within about a minute.",
+        "run": run,
+    }
+
+
 @router.post("", response_model=SavedSearch, status_code=status.HTTP_201_CREATED)
 def create_saved_search(
     request: CreateSavedSearchRequest,
