@@ -61,3 +61,14 @@ jobs:
           DATABASE_URL: ""
         run: python -m unittest test_alert_execution.py
         working-directory: backend
+
+      - name: Run alert email unit tests
+        env:
+          APP_NAME: Job Auto Apply
+          APP_ENV: test
+          REDIS_URL: redis://localhost:6379
+          BACKEND_HOST: 0.0.0.0
+          BACKEND_PORT: 8004
+          DATABASE_URL: ""
+        run: python -m unittest test_alert_email.py
+        working-directory: backend

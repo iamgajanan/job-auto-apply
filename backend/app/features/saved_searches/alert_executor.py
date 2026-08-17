@@ -164,16 +164,11 @@ def process_one_queued_alert() -> int:
             easy_apply=saved_search["easy_apply"],
         )
 
-        # Alerts intentionally bypass consume_search_quota: the alert is an
-        # automated feature already enabled by the user and must not silently
-        # consume interactive search credits.
+        # Alerts bypass interactive search quota by design.
         jobs = SearchEngine().search(request)
         new_jobs = _record_jobs(saved_search, jobs)
         completed_at = datetime.now(timezone.utc)
-        summary = {
-            "jobs_found": len(jobs),
-            "new_jobs": len(new_jobs),
-        }
+        summary = {"jobs_found": len(jobs), "new_jobs": len(new_jobs)}
 
         with get_engine().begin() as connection:
             connection.execute(
@@ -182,7 +177,9 @@ def process_one_queued_alert() -> int:
                     update public.saved_search_alert_runs
                     set status = 'completed', completed_at = :completed_at,
                         new_jobs_count = :new_jobs_count,
-                        result_summary = cast(:summary as jsonb)
+                        result_summary = cast(:summary as jsonb),
+                        email_status = case when :new_jobs_count > 0 then 'queued' else 'not_sent' end,
+                        email_error = null
                     where id = :id
                     """
                 ),
@@ -193,6 +190,19 @@ def process_one_queued_alert() -> int:
                     "summary": json.dumps(summary),
                 },
             )
+            if new_jobs:
+                connection.execute(
+                    text(
+                        """
+                        insert into public.saved_search_alert_email_deliveries
+                            (alert_run_id, user_id, status)
+                        values (:alert_run_id, :user_id, 'queued')
+                        on conflict (alert_run_id) do nothing
+                        """
+                    ),
+                    {"alert_run_id": run_id, "user_id": saved_search["user_id"]},
+                )
+
         LOGGER.info(
             "saved search alert completed: search=%s found=%s new=%s",
             saved_search["id"], len(jobs), len(new_jobs),
