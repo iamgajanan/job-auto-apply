@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -152,6 +153,52 @@ class SavedSearchService:
             )
         if result.rowcount != 1:
             raise HTTPException(status_code=404, detail="Saved search not found")
+
+    def queue_test_alert(self, user_id: str, saved_search_id: str) -> dict[str, Any]:
+        saved_search = self.get(user_id, saved_search_id)
+        if not saved_search["alert_enabled"]:
+            raise HTTPException(status_code=400, detail="Enable job alerts before sending a test alert.")
+
+        now = datetime.now(timezone.utc)
+        with get_engine().begin() as connection:
+            recent = connection.execute(
+                text(
+                    """
+                    select id::text
+                    from public.saved_search_alert_runs
+                    where saved_search_id = :saved_search_id
+                      and user_id = :user_id
+                      and created_at >= timezone('utc', now()) - interval '10 minutes'
+                    order by created_at desc
+                    limit 1
+                    """
+                ),
+                {"saved_search_id": saved_search_id, "user_id": user_id},
+            ).mappings().first()
+            if recent:
+                raise HTTPException(
+                    status_code=429,
+                    detail="A test alert was already queued for this saved search in the last 10 minutes.",
+                )
+
+            row = connection.execute(
+                text(
+                    """
+                    insert into public.saved_search_alert_runs
+                        (saved_search_id, user_id, scheduled_for, status, result_summary)
+                    values
+                        (:saved_search_id, :user_id, :scheduled_for, 'queued', cast(:summary as jsonb))
+                    returning id::text, scheduled_for, status, created_at
+                    """
+                ),
+                {
+                    "saved_search_id": saved_search_id,
+                    "user_id": user_id,
+                    "scheduled_for": now,
+                    "summary": '{"trigger":"manual_test"}',
+                },
+            ).mappings().one()
+        return dict(row)
 
     def alert_status(self, user_id: str, saved_search_id: str) -> dict[str, Any]:
         saved_search = self.get(user_id, saved_search_id)
