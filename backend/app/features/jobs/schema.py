@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, List, Optional
 from uuid import UUID
 
@@ -73,9 +74,9 @@ class ViewedJob(BaseModel):
     platform: str
     job_id: str
     job_data: dict[str, Any]
-    viewed_at: str
-    created_at: str
-    updated_at: str
+    viewed_at: datetime
+    created_at: datetime
+    updated_at: datetime
 
 
 class ViewedJobsResponse(BaseModel):
