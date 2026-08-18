@@ -7,8 +7,9 @@ from app.auth.dependencies import get_current_user
 from app.auth.schemas import CurrentUser
 from app.db.connection import get_engine
 from app.features.jobs.dependencies import get_job_service
-from app.features.jobs.schema import JobSearchRequest, JobSearchResponse
+from app.features.jobs.schema import JobSearchRequest, JobSearchResponse, ViewedJob, ViewedJobRequest, ViewedJobsResponse
 from app.features.jobs.service import JobService
+from app.features.jobs.viewed_service import viewed_job_service
 
 router = APIRouter(
     prefix="/jobs",
@@ -79,7 +80,34 @@ def search_jobs(
             ) from exc
         raise
 
-    # Quota successfully consumed — now run the scraper.
     jobs = service.search_jobs(request, client_ip)
     response.headers["X-Searches-Remaining"] = str(quota["remaining_searches"])
     return {"jobs": jobs}
+
+
+@router.post("/viewed", response_model=ViewedJob)
+def mark_job_viewed(
+    request: ViewedJobRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return viewed_job_service.mark_viewed(current_user.id, request.model_dump(mode="json"))
+
+
+@router.get("/viewed", response_model=ViewedJobsResponse)
+def list_viewed_jobs(
+    limit: int = 50,
+    offset: int = 0,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    return {"viewed_jobs": viewed_job_service.list_viewed(current_user.id, limit, offset)}
+
+
+@router.get("/viewed/{platform}/{job_id}", response_model=ViewedJob | None)
+def get_viewed_job(
+    platform: str,
+    job_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    if platform not in {"linkedin", "naukri"}:
+        raise HTTPException(status_code=400, detail="Unsupported job platform.")
+    return viewed_job_service.get_viewed(current_user.id, platform, job_id)
