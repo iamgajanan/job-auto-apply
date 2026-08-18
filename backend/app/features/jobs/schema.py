@@ -68,6 +68,14 @@ class JobSearchResponse(BaseModel):
 class ViewedJobRequest(JobResponse):
     """The exact job payload returned by search that the user opened."""
 
+    @field_validator("platform")
+    @classmethod
+    def validate_platform(cls, v):
+        v = v.strip().lower()
+        if v not in VALID_PLATFORMS:
+            raise ValueError(f"platform must be one of {sorted(VALID_PLATFORMS)}, got {v!r}")
+        return v
+
 
 class ViewedJob(BaseModel):
     id: str
