@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from app.features.jobs.schema import JobResponse, ViewedJob, ViewedJobRequest
+from app.features.jobs.schema import ViewedJob, ViewedJobRequest
 from app.features.jobs.viewed_service import ViewedJobService
 
 
@@ -34,7 +34,7 @@ class ViewedJobSchemaTests(unittest.TestCase):
     def test_invalid_platform_is_rejected(self):
         invalid = {**JOB, "platform": "indeed"}
         with self.assertRaises(ValueError):
-            JobResponse.model_validate(invalid)
+            ViewedJobRequest.model_validate(invalid)
 
     def test_viewed_job_serializes_timestamps(self):
         value = ViewedJob(
