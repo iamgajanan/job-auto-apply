@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.core.logger import app_logger
+from app.db.connection import warm_database_pool
 from app.features.saved_searches.alert_email import deliver_one_email
 from app.features.saved_searches.alert_executor import process_queued_alerts
 from app.features.saved_searches.alert_scheduler import run_once
@@ -31,6 +32,13 @@ async def _run_alert_worker() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app_logger.info("Backend Started")
+    try:
+        # Pay the managed-Postgres connection setup cost at startup, not on
+        # the first authenticated API request.
+        await asyncio.to_thread(warm_database_pool)
+    except Exception:
+        app_logger.exception("Database warm-up failed; requests will retry the pool connection")
+
     alert_worker_task = asyncio.create_task(_run_alert_worker())
 
     try:
