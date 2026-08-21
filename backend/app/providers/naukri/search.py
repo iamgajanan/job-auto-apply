@@ -23,11 +23,13 @@ DESCRIPTION_SELECTORS = ["span.job-desc", ".job-description"]
 class NaukriSearch(BaseProvider):
     name = "naukri"
     capabilities = ProviderCapabilities(easy_apply=False, remote=True, salary=True, login=True)
-    JOB_LIMIT = 100
+    # Return a useful first page set instead of scraping 100 records across six
+    # browser navigations. The exact query is cached for 30 minutes upstream.
+    JOB_LIMIT = 60
     PROXY_URL = settings.SCRAPER_PROXY_URL or None
     PAGE_SIZE = 20
-    MAX_PAGES = 6
-    POST_NAV_WAIT_MS = 2500
+    MAX_PAGES = 3
+    POST_NAV_WAIT_MS = 1200
     DEBUG_DIR = Path(__file__).resolve().parents[3] / "debug"
 
     def _first_match(self, card, selectors):
