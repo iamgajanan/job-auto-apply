@@ -32,16 +32,22 @@ def _job_payload(job) -> dict:
     return dict(job)
 
 
-def _claim_queued_run():
+def _claim_queued_run(run_id: str | None = None):
+    where = "status = 'queued'"
+    params: dict[str, str] = {}
+    if run_id:
+        where += " and id = :run_id"
+        params["run_id"] = run_id
+
     with get_engine().begin() as connection:
-        row = connection.execute(text("""
+        row = connection.execute(text(f"""
             select id, saved_search_id, user_id, scheduled_for
             from public.saved_search_alert_runs
-            where status = 'queued'
+            where {where}
             order by scheduled_for, created_at
             for update skip locked
             limit 1
-        """)).mappings().first()
+        """), params).mappings().first()
         if not row:
             return None
         connection.execute(text("""
@@ -96,8 +102,8 @@ def _record_jobs(saved_search: dict, jobs: list) -> list[dict]:
     return new_jobs
 
 
-def process_one_queued_alert() -> int:
-    run = _claim_queued_run()
+def process_one_queued_alert(run_id: str | None = None) -> int:
+    run = _claim_queued_run(run_id)
     if not run:
         return 0
     run_id = run["id"]
@@ -111,7 +117,7 @@ def process_one_queued_alert() -> int:
                         result_summary = cast(:summary as jsonb)
                     where id = :id
                 """), {"id": run_id, "completed_at": datetime.now(timezone.utc),
-                      "summary": json.dumps({"reason": "alert_disabled_or_deleted"})})
+                      "summary": '{"reason":"alert_disabled_or_deleted"}'})
             return 1
 
         request = JobSearchRequest(
