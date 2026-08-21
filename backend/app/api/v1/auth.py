@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import text
 
-from app.auth.dependencies import bearer_scheme, get_current_user, load_profile
+from app.auth.dependencies import bearer_scheme, get_current_user, invalidate_auth_cache, load_profile
 from app.auth.schemas import AuthResponse, CurrentUser, LoginRequest, PasswordResetRequest, PasswordUpdateRequest, RefreshRequest, Session, SignupRequest
 from app.auth.service import SupabaseAuthError, auth_service
 from app.db.connection import get_engine
@@ -61,9 +61,6 @@ def signup(request: SignupRequest):
     user = payload.get("user") or {}
     user_id = user.get("id")
     if not user_id:
-        # Supabase can complete the signup and send the confirmation email while
-        # returning no user payload. Confirm the database trigger created the
-        # application profile before treating the response as a failure.
         profile = _profile_for_email(request.email.lower())
         if not profile:
             raise HTTPException(status_code=502, detail="Supabase signup completed without a user profile")
@@ -127,6 +124,8 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
         auth_service.logout(credentials.credentials)
     except SupabaseAuthError as exc:
         raise HTTPException(status_code=_unauthorized_status(exc), detail="Unable to sign out") from exc
+    finally:
+        invalidate_auth_cache(credentials.credentials)
 
 
 @router.get("/me", response_model=CurrentUser)
