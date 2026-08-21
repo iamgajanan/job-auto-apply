@@ -15,7 +15,10 @@ from app.db.connection import get_engine
 bearer_scheme = HTTPBearer(auto_error=False)
 AUTH_CACHE_TTL_SECONDS = 60.0
 AUTH_CACHE_MAX_ENTRIES = 512
+PROFILE_CACHE_TTL_SECONDS = 30.0
+PROFILE_CACHE_MAX_ENTRIES = 512
 _auth_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_profile_cache: dict[str, tuple[float, UserProfile]] = {}
 
 
 def _http_error(exc: SupabaseAuthError) -> HTTPException:
@@ -44,8 +47,32 @@ def _cache_put(token: str, user: dict[str, Any]) -> None:
     _auth_cache[token] = (monotonic(), user)
 
 
+def _profile_cache_get(user_id: UUID) -> UserProfile | None:
+    key = str(user_id)
+    item = _profile_cache.get(key)
+    if item is None:
+        return None
+    created_at, profile = item
+    if monotonic() - created_at >= PROFILE_CACHE_TTL_SECONDS:
+        _profile_cache.pop(key, None)
+        return None
+    return profile
+
+
+def _profile_cache_put(profile: UserProfile) -> None:
+    key = str(profile.id)
+    if len(_profile_cache) >= PROFILE_CACHE_MAX_ENTRIES:
+        oldest_key = min(_profile_cache, key=lambda key: _profile_cache[key][0])
+        _profile_cache.pop(oldest_key, None)
+    _profile_cache[key] = (monotonic(), profile)
+
+
 def invalidate_auth_cache(token: str) -> None:
     _auth_cache.pop(token, None)
+
+
+def invalidate_profile_cache(user_id: str | UUID) -> None:
+    _profile_cache.pop(str(user_id), None)
 
 
 def load_profile(user_id: UUID, email: str | None, full_name: str | None) -> UserProfile:
@@ -59,7 +86,9 @@ def load_profile(user_id: UUID, email: str | None, full_name: str | None) -> Use
         if row:
             data = dict(row)
             data["id"] = str(data["id"])
-            return UserProfile(**data)
+            profile = UserProfile(**data)
+            _profile_cache_put(profile)
+            return profile
 
     with get_engine().begin() as connection:
         row = connection.execute(text("""
@@ -76,7 +105,9 @@ def load_profile(user_id: UUID, email: str | None, full_name: str | None) -> Use
         """), {"id": str(user_id), "email": email, "full_name": full_name}).mappings().one()
     data = dict(row)
     data["id"] = str(data["id"])
-    return UserProfile(**data)
+    profile = UserProfile(**data)
+    _profile_cache_put(profile)
+    return profile
 
 
 def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> CurrentUser:
@@ -97,7 +128,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
         user_id = UUID(str(raw_user["id"]))
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="Invalid authentication subject") from exc
-    profile = load_profile(user_id, raw_user.get("email"), (raw_user.get("user_metadata") or {}).get("full_name"))
+    profile = _profile_cache_get(user_id) or load_profile(user_id, raw_user.get("email"), (raw_user.get("user_metadata") or {}).get("full_name"))
     if profile.status != "active":
         raise HTTPException(status_code=403, detail="Account is not active")
     return CurrentUser(id=str(user_id), email=raw_user.get("email"), profile=profile)
