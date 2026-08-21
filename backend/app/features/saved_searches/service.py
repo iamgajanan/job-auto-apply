@@ -206,11 +206,23 @@ class SavedSearchService:
             rows = connection.execute(
                 text(
                     """
-                    select id::text, scheduled_for, status, created_at, started_at,
-                           completed_at, new_jobs_count, result_summary, error_message
-                    from public.saved_search_alert_runs
-                    where saved_search_id = :saved_search_id and user_id = :user_id
-                    order by created_at desc
+                    select r.id::text,
+                           s.name as saved_search_name,
+                           r.scheduled_for,
+                           r.status,
+                           r.created_at,
+                           r.started_at,
+                           r.completed_at,
+                           r.new_jobs_count,
+                           r.result_summary,
+                           r.error_message
+                    from public.saved_search_alert_runs r
+                    join public.saved_searches s
+                      on s.id = r.saved_search_id
+                     and s.user_id = r.user_id
+                    where r.saved_search_id = :saved_search_id
+                      and r.user_id = :user_id
+                    order by r.created_at desc
                     limit 10
                     """
                 ),
