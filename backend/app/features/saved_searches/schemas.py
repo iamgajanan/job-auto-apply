@@ -31,6 +31,7 @@ class SavedSearch(BaseModel):
 
 class AlertRun(BaseModel):
     id: str
+    saved_search_name: str | None = None
     scheduled_for: datetime
     status: AlertRunStatus
     created_at: datetime
@@ -75,7 +76,7 @@ class UpdateSavedSearchRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     platform: Platform | None = None
     job_title: str | None = Field(default=None, min_length=1, max_length=200)
-    location: str | None = Field(default=None, min_length=1, max_length=200)
+    location: str | None = Field(default=None, max_length=200)
     experience: str | None = Field(default=None, max_length=100)
     work_mode: WorkMode | None = None
     posted_within: str | None = Field(default=None, max_length=50)
