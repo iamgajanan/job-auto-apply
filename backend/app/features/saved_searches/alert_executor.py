@@ -32,16 +32,22 @@ def _job_payload(job) -> dict:
     return dict(job)
 
 
-def _claim_queued_run():
+def _claim_queued_run(run_id: str | None = None):
+    where = "status = 'queued'"
+    params: dict[str, str] = {}
+    if run_id:
+        where += " and id = :run_id"
+        params["run_id"] = run_id
+
     with get_engine().begin() as connection:
-        row = connection.execute(text("""
+        row = connection.execute(text(f"""
             select id, saved_search_id, user_id, scheduled_for
             from public.saved_search_alert_runs
-            where status = 'queued'
+            where {where}
             order by scheduled_for, created_at
             for update skip locked
             limit 1
-        """)).mappings().first()
+        """), params).mappings().first()
         if not row:
             return None
         connection.execute(text("""
@@ -50,6 +56,16 @@ def _claim_queued_run():
             where id = :id
         """), {"id": row["id"], "started_at": datetime.now(timezone.utc)})
         return dict(row)
+
+
+def _load_running_run(run_id: str):
+    with get_engine().connect() as connection:
+        row = connection.execute(text("""
+            select id, saved_search_id, user_id, scheduled_for
+            from public.saved_search_alert_runs
+            where id = :id and status = 'running'
+        """), {"id": run_id}).mappings().first()
+    return dict(row) if row else None
 
 
 def _load_saved_search(saved_search_id: str, user_id: str):
@@ -96,10 +112,7 @@ def _record_jobs(saved_search: dict, jobs: list) -> list[dict]:
     return new_jobs
 
 
-def process_one_queued_alert() -> int:
-    run = _claim_queued_run()
-    if not run:
-        return 0
+def _execute_alert_run(run: dict) -> int:
     run_id = run["id"]
     try:
         saved_search = _load_saved_search(run["saved_search_id"], run["user_id"])
@@ -111,7 +124,7 @@ def process_one_queued_alert() -> int:
                         result_summary = cast(:summary as jsonb)
                     where id = :id
                 """), {"id": run_id, "completed_at": datetime.now(timezone.utc),
-                      "summary": json.dumps({"reason": "alert_disabled_or_deleted"})})
+                      "summary": '{"reason":"alert_disabled_or_deleted"}'})
             return 1
 
         request = JobSearchRequest(
@@ -156,6 +169,21 @@ def process_one_queued_alert() -> int:
             """), {"id": run_id, "completed_at": datetime.now(timezone.utc),
                   "error_message": str(exc)[:2000]})
         return 1
+
+
+def process_alert_run(run_id: str) -> int:
+    """Execute a manually claimed running alert without allowing the scheduler to race it."""
+    run = _load_running_run(run_id)
+    if not run:
+        return 0
+    return _execute_alert_run(run)
+
+
+def process_one_queued_alert(run_id: str | None = None) -> int:
+    run = _claim_queued_run(run_id)
+    if not run:
+        return 0
+    return _execute_alert_run(run)
 
 
 def process_queued_alerts(max_runs: int = 5) -> int:

@@ -44,16 +44,25 @@ def get_alert_jobs(
     return saved_search_service.alert_jobs(current_user.id, saved_search_id, limit)
 
 
-@router.post("/{saved_search_id}/alert-test", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/{saved_search_id}/alert-test", status_code=status.HTTP_200_OK)
 def queue_test_alert(
     saved_search_id: str,
     current_user: CurrentUser = Depends(get_current_user),
 ):
     run = saved_search_service.queue_test_alert(current_user.id, saved_search_id)
-    return {
-        "message": "Test alert queued. It will run automatically within about a minute.",
-        "run": run,
-    }
+    new_jobs = int(run.get("new_jobs_count") or 0)
+    email_status = run.get("email_status")
+    if run.get("status") == "completed" and new_jobs > 0 and email_status == "sent":
+        message = f"Found {new_jobs} new job{'s' if new_jobs != 1 else ''} and sent the alert email."
+    elif run.get("status") == "completed" and new_jobs == 0:
+        message = "Alert completed. No new jobs were found, so no email was sent."
+    elif run.get("status") == "completed" and email_status == "failed":
+        message = f"Found {new_jobs} new job{'s' if new_jobs != 1 else ''}, but the alert email could not be sent."
+    elif run.get("status") == "failed":
+        message = run.get("error_message") or "The alert run failed."
+    else:
+        message = "Test alert completed."
+    return {"message": message, "run": run}
 
 
 @router.post("", response_model=SavedSearch, status_code=status.HTTP_201_CREATED)
