@@ -10,6 +10,7 @@ class PaymentQuotaUpgradeTests(unittest.TestCase):
         self.assertIn("ends_at = timezone('utc', now())", sql)
         self.assertIn("insert into public.quota_allocations", sql)
         self.assertNotIn("sum(granted_searches", sql)
+        self.assertEqual(sql.count("insert into public.quota_allocations"), 1)
 
 
 if __name__ == "__main__":
