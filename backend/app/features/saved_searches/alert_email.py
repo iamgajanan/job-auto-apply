@@ -37,12 +37,7 @@ def _render_email(search_name: str, jobs: list[dict[str, Any]]) -> tuple[str, st
         safe_url = html.escape(url, quote=True)
         meta = " · ".join(value for value in (company, location) if value)
         rows.append(f'<li><a href="{safe_url}"><strong>{title}</strong></a>' + (f"<br>{meta}" if meta else "") + "</li>")
-    body = (
-        f"<h2>{html.escape(search_name)}</h2>"
-        f"<p>We found {len(jobs)} new job{'s' if len(jobs) != 1 else ''} matching your saved search.</p>"
-        f"<ul>{''.join(rows)}</ul>"
-        "<p>You are receiving this because job alerts are enabled for this saved search.</p>"
-    )
+    body = f"<h2>{html.escape(search_name)}</h2><p>We found {len(jobs)} new job{'s' if len(jobs) != 1 else ''} matching your saved search.</p><ul>{''.join(rows)}</ul><p>You are receiving this because job alerts are enabled for this saved search.</p>"
     return subject, body
 
 
@@ -50,7 +45,7 @@ def _load_pending_delivery() -> dict[str, Any] | None:
     with get_engine().begin() as connection:
         delivery = connection.execute(text("""
             select d.id, d.alert_run_id, d.attempts,
-                   r.saved_search_id, r.user_id,
+                   r.saved_search_id, r.user_id, r.created_at as run_created_at,
                    s.name as search_name,
                    coalesce(u.email, p.email) as email,
                    r.started_at, r.completed_at, r.new_jobs_count
@@ -67,9 +62,6 @@ def _load_pending_delivery() -> dict[str, Any] | None:
         if not delivery:
             return None
 
-        # Only include jobs created by this exact alert run. This keeps the
-        # email count identical to the run's new_jobs_count and prevents jobs
-        # from another run from leaking into this email.
         jobs = connection.execute(text("""
             select job_data
             from public.saved_search_alert_jobs
@@ -80,16 +72,12 @@ def _load_pending_delivery() -> dict[str, Any] | None:
             limit :limit
         """), {
             "saved_search_id": delivery["saved_search_id"],
-            "started_at": delivery["started_at"] or delivery["created_at"],
+            "started_at": delivery["started_at"] or delivery["run_created_at"],
             "completed_at": delivery["completed_at"],
             "limit": max(int(delivery["new_jobs_count"] or 0), 0),
         }).mappings().all()
 
-        connection.execute(text(
-            "update public.saved_search_alert_email_deliveries "
-            "set status = 'sending', attempts = attempts + 1, started_at = timezone('utc', now()) "
-            "where id = :id"
-        ), {"id": delivery["id"]})
+        connection.execute(text("update public.saved_search_alert_email_deliveries set status = 'sending', attempts = attempts + 1, started_at = timezone('utc', now()) where id = :id"), {"id": delivery["id"]})
         result = dict(delivery)
         result["jobs"] = [row["job_data"] for row in jobs]
         return result
@@ -119,25 +107,12 @@ def deliver_one_email() -> int:
         subject, body = _render_email(delivery["search_name"], jobs)
         provider_id = _send_via_resend(delivery["email"], subject, body)
         with get_engine().begin() as connection:
-            connection.execute(text("""
-                update public.saved_search_alert_email_deliveries
-                set status = 'sent', sent_at = timezone('utc', now()), completed_at = timezone('utc', now()),
-                    provider_message_id = :provider_message_id, error_message = null
-                where id = :id
-            """), {"id": delivery["id"], "provider_message_id": provider_id})
+            connection.execute(text("update public.saved_search_alert_email_deliveries set status = 'sent', sent_at = timezone('utc', now()), completed_at = timezone('utc', now()), provider_message_id = :provider_message_id, error_message = null where id = :id"), {"id": delivery["id"], "provider_message_id": provider_id})
             connection.execute(text("update public.saved_search_alert_runs set email_status = 'sent', email_error = null where id = :run_id"), {"run_id": delivery["alert_run_id"]})
         return 1
     except Exception as exc:
         LOGGER.exception("job alert email delivery failed: delivery=%s", delivery["id"])
         with get_engine().begin() as connection:
-            connection.execute(text("""
-                update public.saved_search_alert_email_deliveries
-                set status = case when attempts >= 3 then 'failed' else 'queued' end,
-                    error_message = :error_message,
-                    completed_at = case when attempts >= 3 then timezone('utc', now()) else completed_at end
-                where id = :id
-            """), {"id": delivery["id"], "error_message": str(exc)[:2000]})
-            connection.execute(text("update public.saved_search_alert_runs set email_status = :status, email_error = :error where id = :run_id"), {
-                "run_id": delivery["alert_run_id"], "status": "failed" if delivery["attempts"] >= 3 else "queued", "error": str(exc)[:2000],
-            })
+            connection.execute(text("update public.saved_search_alert_email_deliveries set status = case when attempts >= 3 then 'failed' else 'queued' end, error_message = :error_message, completed_at = case when attempts >= 3 then timezone('utc', now()) else completed_at end where id = :id"), {"id": delivery["id"], "error_message": str(exc)[:2000]})
+            connection.execute(text("update public.saved_search_alert_runs set email_status = :status, email_error = :error where id = :run_id"), {"run_id": delivery["alert_run_id"], "status": "failed" if delivery["attempts"] >= 3 else "queued", "error": str(exc)[:2000]})
         return 1
