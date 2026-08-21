@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 from uuid import UUID
@@ -14,16 +13,9 @@ from app.auth.service import SupabaseAuthError, auth_service
 from app.db.connection import get_engine
 
 bearer_scheme = HTTPBearer(auto_error=False)
-AUTH_CACHE_TTL_SECONDS = 8.0
+AUTH_CACHE_TTL_SECONDS = 60.0
 AUTH_CACHE_MAX_ENTRIES = 512
 _auth_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-
-
-@dataclass(frozen=True)
-class AuthContext:
-    user_id: UUID
-    email: str | None
-    profile: UserProfile
 
 
 def _http_error(exc: SupabaseAuthError) -> HTTPException:
@@ -57,7 +49,18 @@ def invalidate_auth_cache(token: str) -> None:
 
 
 def load_profile(user_id: UUID, email: str | None, full_name: str | None) -> UserProfile:
-    """Ensure the profile is current and return it in one database round-trip."""
+    """Read an existing profile without turning every authenticated request into a write transaction."""
+    with get_engine().connect() as connection:
+        row = connection.execute(text("""
+            select id, email, full_name, role, status, plan_code
+            from public.profiles
+            where id = :id
+        """), {"id": str(user_id)}).mappings().one_or_none()
+        if row:
+            data = dict(row)
+            data["id"] = str(data["id"])
+            return UserProfile(**data)
+
     with get_engine().begin() as connection:
         row = connection.execute(text("""
             insert into public.profiles (id, email, full_name, role, status, plan_code)
@@ -79,7 +82,6 @@ def load_profile(user_id: UUID, email: str | None, full_name: str | None) -> Use
 def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> CurrentUser:
     if not credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required", headers={"WWW-Authenticate": "Bearer"})
-
     token = credentials.credentials
     auth_user = _cache_get(token)
     if auth_user is None:
@@ -88,7 +90,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
         except SupabaseAuthError as exc:
             raise _http_error(exc) from exc
         _cache_put(token, auth_user)
-
     raw_user = auth_user.get("user") if isinstance(auth_user.get("user"), dict) else auth_user
     if not raw_user:
         raise HTTPException(status_code=401, detail="Invalid authentication response")
@@ -96,7 +97,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
         user_id = UUID(str(raw_user["id"]))
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="Invalid authentication subject") from exc
-
     profile = load_profile(user_id, raw_user.get("email"), (raw_user.get("user_metadata") or {}).get("full_name"))
     if profile.status != "active":
         raise HTTPException(status_code=403, detail="Account is not active")
@@ -106,4 +106,3 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
 def require_super_admin(current_user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     if current_user.profile.role != "super_admin":
         raise HTTPException(status_code=403, detail="Super admin access required")
-    return current_user
