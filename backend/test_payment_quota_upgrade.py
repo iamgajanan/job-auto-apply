@@ -1,0 +1,15 @@
+import unittest
+
+from app.features.payments.service import PaymentService
+
+
+class PaymentQuotaUpgradeTests(unittest.TestCase):
+    def test_quota_upgrade_closes_active_allocation(self):
+        sql = PaymentService.close_active_quota_sql()
+        self.assertIn("update public.quota_allocations", sql)
+        self.assertIn("set ends_at = timezone('utc', now())", sql)
+        self.assertIn("ends_at is null or ends_at > timezone('utc', now())", sql)
+
+
+if __name__ == "__main__":
+    unittest.main()
