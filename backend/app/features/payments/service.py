@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -18,6 +17,16 @@ RAZORPAY_API = "https://api.razorpay.com/v1"
 
 
 class PaymentService:
+    @staticmethod
+    def close_active_quota_sql() -> str:
+        return """
+        update public.quota_allocations
+        set ends_at = timezone('utc', now())
+        where user_id = :user_id
+          and starts_at <= timezone('utc', now())
+          and (ends_at is null or ends_at > timezone('utc', now()))
+        """
+
     def _require_keys(self) -> None:
         if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
             raise HTTPException(status_code=503, detail="Razorpay is not configured")
@@ -76,23 +85,11 @@ class PaymentService:
                 text(
                     """
                     insert into public.payments (
-                        user_id,
-                        plan_code,
-                        provider,
-                        provider_order_id,
-                        amount_inr_paise,
-                        currency,
-                        status,
-                        metadata
+                        user_id, plan_code, provider, provider_order_id,
+                        amount_inr_paise, currency, status, metadata
                     ) values (
-                        :user_id,
-                        :plan_code,
-                        'razorpay',
-                        :order_id,
-                        :amount,
-                        'INR',
-                        'created',
-                        cast(:metadata as jsonb)
+                        :user_id, :plan_code, 'razorpay', :order_id,
+                        :amount, 'INR', 'created', cast(:metadata as jsonb)
                     )
                     """
                 ),
@@ -225,6 +222,12 @@ class PaymentService:
                 {"payment_id": payment_id, "signature": signature, "id": payment["id"]},
             )
 
+            # A paid plan replaces the currently active quota window.
+            # This prevents 50 free + 100 paid from becoming 150.
+            connection.execute(
+                text(self.close_active_quota_sql()),
+                {"user_id": user_id},
+            )
             connection.execute(
                 text(
                     """
@@ -272,19 +275,10 @@ class PaymentService:
                 text(
                     """
                     insert into public.subscriptions (
-                        user_id,
-                        plan_code,
-                        status,
-                        provider,
-                        started_at,
-                        metadata
+                        user_id, plan_code, status, provider, started_at, metadata
                     ) values (
-                        :user_id,
-                        :plan_code,
-                        'active',
-                        'razorpay',
-                        timezone('utc', now()),
-                        cast(:metadata as jsonb)
+                        :user_id, :plan_code, 'active', 'razorpay',
+                        timezone('utc', now()), cast(:metadata as jsonb)
                     )
                     """
                 ),
