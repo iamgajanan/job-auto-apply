@@ -10,104 +10,54 @@ from app.features.jobs.dependencies import get_job_service
 from app.features.jobs.schema import JobSearchRequest, JobSearchResponse, ViewedJob, ViewedJobRequest, ViewedJobsResponse
 from app.features.jobs.service import JobService
 from app.features.jobs.viewed_service import viewed_job_service
+from app.gateway.block_detector import PlatformAccessError
 
-router = APIRouter(
-    prefix="/jobs",
-    tags=["Jobs"],
-)
-
+router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
 @router.get("/health")
 def health():
     return {"message": "Jobs API Working"}
 
-
-@router.post(
-    "/search",
-    response_model=JobSearchResponse,
-)
-def search_jobs(
-    request: JobSearchRequest,
-    http_request: Request,
-    response: Response,
-    current_user: CurrentUser = Depends(get_current_user),
-    service: JobService = Depends(get_job_service),
-):
+@router.post("/search", response_model=JobSearchResponse)
+def search_jobs(request: JobSearchRequest, http_request: Request, response: Response, current_user: CurrentUser = Depends(get_current_user), service: JobService = Depends(get_job_service)):
     client_ip = http_request.client.host if http_request.client else "unknown"
-
-    # Super admins are unlimited for testing/operations and are not charged.
     if current_user.profile.role == "super_admin":
-        jobs = service.search_jobs(request, client_ip)
+        try:
+            jobs = service.search_jobs(request, client_ip)
+        except PlatformAccessError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         response.headers["X-Searches-Remaining"] = "unlimited"
         return {"jobs": jobs}
-
-    # Consume quota BEFORE running the scraper.
-    # Quota is charged on attempt (not on success) because the scraper resource
-    # is consumed regardless of whether results are returned. This also prevents
-    # a user with 0 quota from triggering an expensive Playwright session.
     request_id = uuid4()
     try:
         with get_engine().begin() as connection:
-            quota = connection.execute(
-                text(
-                    """
-                    select *
-                    from public.consume_search_quota(
-                        :user_id,
-                        :platform,
-                        :job_title,
-                        :location,
-                        1,
-                        :request_id,
-                        cast(:metadata as jsonb)
-                    )
-                    """
-                ),
-                {
-                    "user_id": current_user.id,
-                    "platform": request.platform,
-                    "job_title": request.job_title,
-                    "location": request.location,
-                    "request_id": str(request_id),
-                    "metadata": '{"client_ip":"' + client_ip.replace('"', '') + '"}',
-                },
-            ).mappings().one()
+            quota = connection.execute(text("""
+                select * from public.consume_search_quota(
+                    :user_id, :platform, :job_title, :location, 1, :request_id,
+                    cast(:metadata as jsonb)
+                )
+            """), {"user_id": current_user.id, "platform": request.platform, "job_title": request.job_title, "location": request.location, "request_id": str(request_id), "metadata": '{"client_ip":"' + client_ip.replace('"', '') + '"}'}).mappings().one()
     except SQLAlchemyError as exc:
         if "search quota exceeded" in str(exc).lower():
-            raise HTTPException(
-                status_code=429,
-                detail="Search quota exhausted. Upgrade your plan to continue.",
-            ) from exc
+            raise HTTPException(status_code=429, detail="Search quota exhausted. Upgrade your plan to continue.") from exc
         raise
-
-    jobs = service.search_jobs(request, client_ip)
+    try:
+        jobs = service.search_jobs(request, client_ip)
+    except PlatformAccessError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     response.headers["X-Searches-Remaining"] = str(quota["remaining_searches"])
     return {"jobs": jobs}
 
-
 @router.post("/viewed", response_model=ViewedJob)
-def mark_job_viewed(
-    request: ViewedJobRequest,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def mark_job_viewed(request: ViewedJobRequest, current_user: CurrentUser = Depends(get_current_user)):
     return viewed_job_service.mark_viewed(current_user.id, request.model_dump(mode="json"))
 
-
 @router.get("/viewed", response_model=ViewedJobsResponse)
-def list_viewed_jobs(
-    limit: int = 50,
-    offset: int = 0,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def list_viewed_jobs(limit: int = 50, offset: int = 0, current_user: CurrentUser = Depends(get_current_user)):
     return {"viewed_jobs": viewed_job_service.list_viewed(current_user.id, limit, offset)}
 
-
 @router.get("/viewed/{platform}/{job_id}", response_model=ViewedJob | None)
-def get_viewed_job(
-    platform: str,
-    job_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def get_viewed_job(platform: str, job_id: str, current_user: CurrentUser = Depends(get_current_user)):
     if platform not in {"linkedin", "naukri"}:
         raise HTTPException(status_code=400, detail="Unsupported job platform.")
     return viewed_job_service.get_viewed(current_user.id, platform, job_id)
