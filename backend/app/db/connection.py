@@ -8,13 +8,7 @@ from app.config.settings import settings
 
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
-    """Create the application database engine lazily.
-
-    DATABASE_URL is intentionally optional during the migration to Supabase so
-    existing scraper-only deployments can still import the application without
-    a database configured. Once the database is enabled, the value should be a
-    Supabase Postgres connection string kept in an environment secret.
-    """
+    """Create the application database engine lazily with a reusable pool."""
     if not settings.DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not configured")
 
@@ -26,6 +20,10 @@ def get_engine() -> Engine:
 
     return create_engine(
         url,
+        pool_size=5,
+        max_overflow=5,
+        pool_timeout=5,
+        pool_recycle=1800,
         pool_pre_ping=True,
     )
 
