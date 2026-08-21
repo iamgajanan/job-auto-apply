@@ -1,0 +1,207 @@
+name: Deploy Backend to Raspberry Pi
+
+on:
+  push:
+    branches: [just-scrapping]
+  workflow_dispatch:
+
+concurrency:
+  group: job-auto-apply-backend-just-scrapping
+  cancel-in-progress: true
+
+jobs:
+  migrate-database:
+    name: Apply Supabase database migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Apply database migrations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$SUPABASE_DB_URL"
+          test -f supabase/config.toml
+          supabase --yes db push --db-url "$SUPABASE_DB_URL"
+
+  deploy:
+    name: Deploy FastAPI backend
+    needs: migrate-database
+    runs-on: [self-hosted, linux, arm64]
+    steps:
+      - name: Deploy just-scrapping to Raspberry Pi
+        shell: bash
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          RAZORPAY_KEY_ID: ${{ secrets.RAZORPAY_KEY_ID }}
+          RAZORPAY_KEY_SECRET: ${{ secrets.RAZORPAY_KEY_SECRET }}
+          RAZORPAY_WEBHOOK_SECRET: ${{ secrets.RAZORPAY_WEBHOOK_SECRET }}
+          CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
+          CI_TEST_USER_EMAIL: ${{ secrets.CI_TEST_USER_EMAIL }}
+          CI_TEST_USER_PASSWORD: ${{ secrets.CI_TEST_USER_PASSWORD }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          APP_DIR=/home/iamgajanan/Projects/job-auto-apply
+          BACKEND_DIR=$APP_DIR/backend
+          VENV=$BACKEND_DIR/.venv/bin
+          AUTH_KEY="${SUPABASE_PUBLISHABLE_KEY:-${SUPABASE_ANON_KEY:-}}"
+
+          on_error() {
+            rc=$?
+            echo "=== DEPLOY FAILED: service diagnostics ==="
+            sudo -n systemctl status job-auto-apply.service --no-pager || true
+            sudo -n journalctl -u job-auto-apply.service -n 160 --no-pager || true
+            echo "=== END SERVICE DIAGNOSTICS ==="
+            exit "$rc"
+          }
+          trap on_error ERR
+
+          test -d "$APP_DIR/.git"
+          test -x "$VENV/python"
+          test -n "$SUPABASE_DB_URL"
+          test -n "$SUPABASE_URL"
+          test -n "$AUTH_KEY"
+          test -n "$SUPABASE_SERVICE_ROLE_KEY"
+          test -n "$CI_TEST_USER_EMAIL"
+          test -n "$CI_TEST_USER_PASSWORD"
+
+          cd "$APP_DIR"
+          git fetch --prune origin just-scrapping
+          git checkout just-scrapping
+          git reset --hard origin/just-scrapping
+
+          cd "$BACKEND_DIR"
+          "$VENV/python" -m pip install --disable-pip-version-check -r requirements.txt
+          "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
+
+          cd "$APP_DIR"
+          SUPABASE_DB_URL="$SUPABASE_DB_URL" SUPABASE_URL="$SUPABASE_URL" SUPABASE_PUBLISHABLE_KEY="$AUTH_KEY" RAZORPAY_KEY_ID="$RAZORPAY_KEY_ID" RAZORPAY_KEY_SECRET="$RAZORPAY_KEY_SECRET" RAZORPAY_WEBHOOK_SECRET="$RAZORPAY_WEBHOOK_SECRET" CORS_ORIGINS="$CORS_ORIGINS" SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_SERVICE_ROLE_KEY" "$VENV/python" - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/home/iamgajanan/Projects/job-auto-apply/.env')
+          lines=p.read_text().splitlines() if p.exists() else []
+          managed={
+            'DATABASE_URL':os.environ['SUPABASE_DB_URL'],
+            'SUPABASE_URL':os.environ['SUPABASE_URL'],
+            'SUPABASE_PUBLISHABLE_KEY':os.environ['SUPABASE_PUBLISHABLE_KEY'],
+            'RAZORPAY_KEY_ID':os.environ.get('RAZORPAY_KEY_ID',''),
+            'RAZORPAY_KEY_SECRET':os.environ.get('RAZORPAY_KEY_SECRET',''),
+            'RAZORPAY_WEBHOOK_SECRET':os.environ.get('RAZORPAY_WEBHOOK_SECRET',''),
+            'SUPABASE_SERVICE_ROLE_KEY':os.environ['SUPABASE_SERVICE_ROLE_KEY'],
+          }
+          if os.environ.get('CORS_ORIGINS'):
+            managed['CORS_ORIGINS']=os.environ['CORS_ORIGINS']
+          lines=[x for x in lines if x.split('=',1)[0] not in managed]
+          lines += [f'{k}={v}' for k,v in managed.items()]
+          p.write_text('\n'.join(lines)+'\n')
+          p.chmod(0o600)
+          PY
+
+          sudo -n install -m 0644 "$APP_DIR/deploy/job-auto-apply.service" /etc/systemd/system/job-auto-apply.service
+          sudo -n systemctl daemon-reload
+          sudo -n systemctl enable job-auto-apply.service
+          sudo -n systemctl restart job-auto-apply.service
+
+          for i in {1..30}; do
+            if curl -fsS --max-time 3 http://127.0.0.1:8004/ >/tmp/job-health.json; then break; fi
+            [ "$i" -lt 30 ] || { sudo -n systemctl status job-auto-apply.service --no-pager || true; sudo -n journalctl -u job-auto-apply.service -n 80 --no-pager || true; exit 1; }
+            sleep 2
+          done
+          cat /tmp/job-health.json
+
+          sudo -n systemctl restart cloudflared-n8n.service
+          sleep 3
+          sudo -n systemctl is-active --quiet cloudflared-n8n.service
+
+          public_ok=false
+          for i in {1..5}; do
+            code=$(curl -sS -o /tmp/public.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/ || true)
+            echo "public attempt $i: $code"
+            if [ "$code" = 200 ]; then public_ok=true; cat /tmp/public.json; break; fi
+            sleep 2
+          done
+          [ "$public_ok" = true ]
+
+          code=$(curl -sS -o /tmp/public-db.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/api/v1/health/database || true)
+          echo "public database health: $code"
+          cat /tmp/public-db.json
+          [ "$code" = 200 ]
+
+          TMP=$(mktemp -d)
+          trap 'rm -rf "$TMP"' EXIT
+          expect(){ [ "$1" = "$2" ] || { echo "Expected $1 got $2 ($4)"; cat "$3" || true; exit 1; }; }
+          assert_fast(){
+            local label="$1" url="$2" token="$3" elapsed
+            elapsed=$(curl -sS --http1.1 --max-time 10 -o /dev/null -w '%{time_total}' -H "Authorization: Bearer $token" "$url")
+            echo "$label: ${elapsed}s"
+            "$VENV/python" - "$elapsed" "$label" <<'PY'
+          import sys
+          elapsed=float(sys.argv[1]); label=sys.argv[2]
+          if elapsed > 2.0:
+              raise SystemExit(f"ERROR: {label} exceeded 2.0s ({elapsed:.3f}s)")
+          PY
+          }
+
+          code=$(curl -sS -o "$TMP/db" -w '%{http_code}' http://127.0.0.1:8004/api/v1/health/database); expect 200 "$code" "$TMP/db" db-health
+          code=$(curl -sS -o "$TMP/plans" -w '%{http_code}' http://127.0.0.1:8004/api/v1/plans); expect 200 "$code" "$TMP/plans" plans
+          "$VENV/python" - "$TMP/plans" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          assert len(d['plans'])==5
+          assert {p['code'] for p in d['plans']}=={'free','starter','growth','pro','business'}
+          PY
+
+          for ep in auth/me account/me admin/users; do
+            code=$(curl -sS -o "$TMP/noauth" -w '%{http_code}' "http://127.0.0.1:8004/api/v1/$ep")
+            expect 401 "$code" "$TMP/noauth" "$ep-no-token"
+          done
+          code=$(curl -sS -o "$TMP/fake" -w '%{http_code}' -H 'Authorization: Bearer invalid-token' http://127.0.0.1:8004/api/v1/auth/me); expect 401 "$code" "$TMP/fake" fake-token
+          code=$(curl -sS -o "$TMP/jobs" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/jobs/search -H 'Content-Type: application/json' --data '{"platform":"naukri","job_title":"react","location":"pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}'); expect 401 "$code" "$TMP/jobs" unauthenticated-job-search
+          code=$(curl -sS -o "$TMP/refresh" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/refresh -H 'Content-Type: application/json' --data '{"refresh_token":"invalid-refresh-token-value-123456"}'); [ "$code" -ge 400 ]
+          code=$(curl -sS -o "$TMP/password" -w '%{http_code}' -X PUT http://127.0.0.1:8004/api/v1/auth/password -H 'Authorization: Bearer invalid-token' -H 'Content-Type: application/json' --data '{"password":"AnotherPassword123!"}'); expect 401 "$code" "$TMP/password" invalid-password-token
+          code=$(curl -sS -o "$TMP/logout" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H 'Authorization: Bearer invalid-token'); expect 401 "$code" "$TMP/logout" invalid-logout-token
+          code=$(curl -sS -o "$TMP/reset" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/password-reset -H 'Content-Type: application/json' --data '{"email":"nobody-ci@example.com"}'); expect 202 "$code" "$TMP/reset" password-reset
+
+          CI_USER="$CI_TEST_USER_EMAIL"
+          CI_PASS="$CI_TEST_USER_PASSWORD"
+          code=$(curl -sS --max-time 30 -o "$TMP/login" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/login -H 'Content-Type: application/json' --data "{\"email\":\"$CI_USER\",\"password\":\"$CI_PASS\"}")
+          expect 200 "$code" "$TMP/login" ci-user-login
+          TOKEN=$("$VENV/python" - "$TMP/login" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); print((d.get('session') or {}).get('access_token',''))
+          PY
+          )
+          [ -n "$TOKEN" ]
+          code=$(curl -sS --max-time 30 -o "$TMP/me" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me); expect 200 "$code" "$TMP/me" authenticated-me
+          code=$(curl -sS --max-time 30 -o "$TMP/account" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/account/me); expect 200 "$code" "$TMP/account" authenticated-account
+          code=$(curl -sS --max-time 30 -o "$TMP/admin" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/admin/users); expect 403 "$code" "$TMP/admin" regular-user-admin-rejection
+          code=$(curl -sS --max-time 30 -o "$TMP/out" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H "Authorization: Bearer $TOKEN"); expect 204 "$code" "$TMP/out" local-logout
+          code=$(curl -sS --max-time 30 -o "$TMP/after" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8004/api/v1/auth/me); expect 401 "$code" "$TMP/after" post-logout-token-rejected
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-login" -w '%{http_code}' -X POST https://jobs.n8npi.live/api/v1/auth/login -H 'Content-Type: application/json' --data "{\"email\":\"$CI_USER\",\"password\":\"$CI_PASS\"}")
+          expect 200 "$code" "$TMP/public-login" public-ci-user-login
+          PUBLIC_TOKEN=$("$VENV/python" - "$TMP/public-login" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); print((d.get('session') or {}).get('access_token',''))
+          PY
+          )
+          [ -n "$PUBLIC_TOKEN" ]
+
+          assert_fast "public auth/me" "https://jobs.n8npi.live/api/v1/auth/me" "$PUBLIC_TOKEN"
+          assert_fast "public account/me" "https://jobs.n8npi.live/api/v1/account/me" "$PUBLIC_TOKEN"
+          assert_fast "public saved-searches" "https://jobs.n8npi.live/api/v1/saved-searches" "$PUBLIC_TOKEN"
+          assert_fast "public viewed-jobs" "https://jobs.n8npi.live/api/v1/jobs/viewed?limit=20&offset=0" "$PUBLIC_TOKEN"
+          assert_fast "public payment-history" "https://jobs.n8npi.live/api/v1/payments/history?limit=20" "$PUBLIC_TOKEN"
+
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-out" -w '%{http_code}' -X POST https://jobs.n8npi.live/api/v1/auth/logout -H "Authorization: Bearer $PUBLIC_TOKEN"); expect 204 "$code" "$TMP/public-out" public-logout
+          code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-after" -w '%{http_code}' -H "Authorization: Bearer $PUBLIC_TOKEN" https://jobs.n8npi.live/api/v1/auth/me); expect 401 "$code" "$TMP/public-after" public-post-logout-token-rejected
+
+          echo 'POST-DEPLOY API SMOKE CHECKS: PASS'
+          echo 'NON-SEARCH API LATENCY BUDGET: PASS'
