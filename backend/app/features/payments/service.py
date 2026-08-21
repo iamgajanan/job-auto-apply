@@ -41,7 +41,7 @@ class PaymentService:
 
     def create_order(self, user_id: str, plan_code: str) -> dict[str, Any]:
         with get_engine().connect() as connection:
-            plan = connection.execute(
+            target_plan = connection.execute(
                 text(
                     """
                     select code, name, price_inr_paise, search_limit, billing_interval
@@ -51,19 +51,47 @@ class PaymentService:
                 ),
                 {"code": plan_code},
             ).mappings().one_or_none()
+            current_plan = connection.execute(
+                text(
+                    """
+                    select p.code, p.name, p.price_inr_paise
+                    from public.profiles profile
+                    join public.plans p on p.code = profile.plan_code
+                    where profile.id = :user_id
+                    """
+                ),
+                {"user_id": user_id},
+            ).mappings().one_or_none()
 
-        if not plan:
+        if not target_plan:
             raise HTTPException(status_code=404, detail="Plan not found")
-        if plan["price_inr_paise"] <= 0:
+        target_price = int(target_plan["price_inr_paise"])
+        current_price = int(current_plan["price_inr_paise"]) if current_plan else 0
+
+        if target_price <= 0:
             raise HTTPException(status_code=400, detail="The free plan does not require payment")
+        if current_plan and target_price <= current_price:
+            raise HTTPException(status_code=400, detail="Select a higher plan to upgrade")
+
+        # For a mid-month upgrade, charge only the price difference now.
+        # The selected target plan becomes the user's full monthly plan for
+        # the next billing cycle, so the next renewal is charged at target_price.
+        upgrade_amount = target_price - current_price if current_price > 0 else target_price
 
         self._require_keys()
         receipt = f"jobauto_{user_id[:8]}_{plan_code}_{uuid4().hex[:10]}"
         payload = {
-            "amount": int(plan["price_inr_paise"]),
+            "amount": upgrade_amount,
             "currency": "INR",
             "receipt": receipt,
-            "notes": {"user_id": user_id, "plan_code": plan_code},
+            "notes": {
+                "user_id": user_id,
+                "plan_code": plan_code,
+                "current_plan_code": current_plan["code"] if current_plan else None,
+                "current_plan_price_inr_paise": current_price,
+                "target_plan_price_inr_paise": target_price,
+                "upgrade_amount_inr_paise": upgrade_amount,
+            },
         }
 
         try:
@@ -97,18 +125,24 @@ class PaymentService:
                     "user_id": user_id,
                     "plan_code": plan_code,
                     "order_id": order_id,
-                    "amount": int(plan["price_inr_paise"]),
-                    "metadata": json.dumps({"receipt": receipt}),
+                    "amount": upgrade_amount,
+                    "metadata": json.dumps({
+                        "receipt": receipt,
+                        "current_plan_code": current_plan["code"] if current_plan else None,
+                        "current_plan_price_inr_paise": current_price,
+                        "target_plan_price_inr_paise": target_price,
+                        "upgrade_amount_inr_paise": upgrade_amount,
+                    }),
                 },
             )
 
         return {
             "order_id": order_id,
-            "amount_inr_paise": int(plan["price_inr_paise"]),
+            "amount_inr_paise": upgrade_amount,
             "currency": "INR",
-            "plan_code": plan["code"],
-            "plan_name": plan["name"],
-            "search_limit": int(plan["search_limit"]),
+            "plan_code": target_plan["code"],
+            "plan_name": target_plan["name"],
+            "search_limit": int(target_plan["search_limit"]),
             "razorpay_key_id": settings.RAZORPAY_KEY_ID,
         }
 
@@ -222,8 +256,6 @@ class PaymentService:
                 {"payment_id": payment_id, "signature": signature, "id": payment["id"]},
             )
 
-            # A paid plan replaces the currently active quota window.
-            # This prevents 50 free + 100 paid from becoming 150.
             connection.execute(
                 text(self.close_active_quota_sql()),
                 {"user_id": user_id},
