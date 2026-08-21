@@ -10,6 +10,7 @@ import httpx
 from fastapi import HTTPException
 from sqlalchemy import text
 
+from app.auth.dependencies import invalidate_profile_cache
 from app.config.settings import settings
 from app.db.connection import get_engine
 
@@ -123,6 +124,7 @@ class PaymentService:
                     select coalesce(sum(granted_searches - used_searches), 0)::int from public.quota_allocations
                     where user_id = :user_id and starts_at <= timezone('utc', now()) and (ends_at is null or ends_at > timezone('utc', now()))
                 """), {"user_id": user_id}).scalar_one()
+                invalidate_profile_cache(user_id)
                 return {"status": "captured", "plan_code": payment["plan_code"], "granted_searches": 0, "remaining_searches": remaining}
             if signature is not None and not self.verify_signature(order_id, payment_id, signature, settings.RAZORPAY_KEY_SECRET):
                 raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
@@ -158,6 +160,7 @@ class PaymentService:
                 select coalesce(sum(granted_searches - used_searches), 0)::int from public.quota_allocations
                 where user_id = :user_id and starts_at <= timezone('utc', now()) and (ends_at is null or ends_at > timezone('utc', now()))
             """), {"user_id": user_id}).scalar_one()
+        invalidate_profile_cache(user_id)
         return {"status": "captured", "plan_code": plan["code"], "granted_searches": int(plan["search_limit"]), "remaining_searches": int(remaining)}
 
 
