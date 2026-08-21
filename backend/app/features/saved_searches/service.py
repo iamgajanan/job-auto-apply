@@ -185,9 +185,9 @@ class SavedSearchService:
                 text(
                     """
                     insert into public.saved_search_alert_runs
-                        (saved_search_id, user_id, scheduled_for, status, result_summary)
+                        (saved_search_id, user_id, scheduled_for, status, started_at, result_summary)
                     values
-                        (:saved_search_id, :user_id, :scheduled_for, 'queued', cast(:summary as jsonb))
+                        (:saved_search_id, :user_id, :scheduled_for, 'running', :started_at, cast(:summary as jsonb))
                     returning id::text, scheduled_for, status, created_at
                     """
                 ),
@@ -195,14 +195,15 @@ class SavedSearchService:
                     "saved_search_id": saved_search_id,
                     "user_id": user_id,
                     "scheduled_for": now,
+                    "started_at": now,
                     "summary": '{"trigger":"manual_test"}',
                 },
             ).mappings().one()
 
         from app.features.saved_searches.alert_email import deliver_one_email
-        from app.features.saved_searches.alert_executor import process_one_queued_alert
+        from app.features.saved_searches.alert_executor import process_alert_run
 
-        process_one_queued_alert(row["id"])
+        process_alert_run(row["id"])
         deliver_one_email(row["id"])
 
         with get_engine().connect() as connection:
