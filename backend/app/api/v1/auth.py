@@ -6,7 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import text
 
 from app.auth.dependencies import bearer_scheme, get_current_user, invalidate_auth_cache, load_profile
-from app.auth.schemas import AuthResponse, CurrentUser, LoginRequest, PasswordResetRequest, PasswordUpdateRequest, Session, SignupRequest, UserProfile
+from app.auth.schemas import AuthResponse, CurrentUser, LoginRequest, PasswordResetRequest, PasswordUpdateRequest, RefreshRequest, Session, SignupRequest, UserProfile
 from app.auth.service import SupabaseAuthError, auth_service
 from app.db.connection import get_engine
 
