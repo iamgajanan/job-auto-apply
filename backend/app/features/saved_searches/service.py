@@ -198,7 +198,40 @@ class SavedSearchService:
                     "summary": '{"trigger":"manual_test"}',
                 },
             ).mappings().one()
-        return dict(row)
+
+        from app.features.saved_searches.alert_email import deliver_one_email
+        from app.features.saved_searches.alert_executor import process_one_queued_alert
+
+        process_one_queued_alert(row["id"])
+        deliver_one_email(row["id"])
+
+        with get_engine().connect() as connection:
+            final = connection.execute(
+                text(
+                    """
+                    select r.id::text,
+                           s.name as saved_search_name,
+                           r.scheduled_for,
+                           r.status,
+                           r.created_at,
+                           r.started_at,
+                           r.completed_at,
+                           r.new_jobs_count,
+                           r.result_summary,
+                           r.error_message,
+                           r.email_status,
+                           r.email_error
+                    from public.saved_search_alert_runs r
+                    join public.saved_searches s
+                      on s.id = r.saved_search_id
+                     and s.user_id = r.user_id
+                    where r.id = :run_id and r.user_id = :user_id
+                    """
+                ),
+                {"run_id": row["id"], "user_id": user_id},
+            ).mappings().one()
+
+        return dict(final)
 
     def alert_status(self, user_id: str, saved_search_id: str) -> dict[str, Any]:
         saved_search = self.get(user_id, saved_search_id)
@@ -215,7 +248,9 @@ class SavedSearchService:
                            r.completed_at,
                            r.new_jobs_count,
                            r.result_summary,
-                           r.error_message
+                           r.error_message,
+                           r.email_status,
+                           r.email_error
                     from public.saved_search_alert_runs r
                     join public.saved_searches s
                       on s.id = r.saved_search_id

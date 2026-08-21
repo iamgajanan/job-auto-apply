@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -5,11 +6,12 @@ from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import text
 
 from app.auth.dependencies import bearer_scheme, get_current_user, invalidate_auth_cache, load_profile
-from app.auth.schemas import AuthResponse, CurrentUser, LoginRequest, PasswordResetRequest, PasswordUpdateRequest, RefreshRequest, Session, SignupRequest
+from app.auth.schemas import AuthResponse, CurrentUser, LoginRequest, PasswordResetRequest, PasswordUpdateRequest, Session, SignupRequest, UserProfile
 from app.auth.service import SupabaseAuthError, auth_service
 from app.db.connection import get_engine
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+_AUTH_LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="auth-profile")
 
 
 def _session(payload: dict) -> Session | None:
@@ -19,7 +21,6 @@ def _session(payload: dict) -> Session | None:
 
 
 def _profile_for_user(user_id: str, email: str | None = None, full_name: str | None = None):
-    from app.auth.schemas import UserProfile
     with get_engine().connect() as connection:
         row = connection.execute(text("select id, email, full_name, role, status, plan_code from public.profiles where id = :id"), {"id": user_id}).mappings().one_or_none()
     if row:
@@ -30,7 +31,6 @@ def _profile_for_user(user_id: str, email: str | None = None, full_name: str | N
 
 
 def _profile_for_email(email: str):
-    from app.auth.schemas import UserProfile
     with get_engine().connect() as connection:
         row = connection.execute(text("select id, email, full_name, role, status, plan_code from public.profiles where lower(email) = lower(:email)"), {"email": email}).mappings().one_or_none()
     if not row:
@@ -58,6 +58,7 @@ def signup(request: SignupRequest):
         payload = auth_service.signup(request.email.lower(), request.password, request.full_name)
     except SupabaseAuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
     user = payload.get("user") or {}
     user_id = user.get("id")
     if not user_id:
@@ -65,21 +66,42 @@ def signup(request: SignupRequest):
         if not profile:
             raise HTTPException(status_code=502, detail="Supabase signup completed without a user profile")
         return AuthResponse(user=profile, session=None, email_confirmation_required=True)
-    profile = load_profile(UUID(user_id), user.get("email"), request.full_name)
+
+    # New accounts are created by the Supabase trigger with these application
+    # defaults. Avoid an extra profile round-trip on the signup critical path.
+    user_metadata = user.get("user_metadata") or {}
+    profile = UserProfile(
+        id=str(user_id),
+        email=user.get("email") or request.email.lower(),
+        full_name=user_metadata.get("full_name") or request.full_name,
+        role="user",
+        status="active",
+        plan_code="free",
+    )
     return AuthResponse(user=profile, session=_session(payload), email_confirmation_required=payload.get("session") is None)
 
 
 @router.post("/login", response_model=AuthResponse)
 def login(request: LoginRequest):
+    email = request.email.lower()
+    profile_future = _AUTH_LOOKUP_EXECUTOR.submit(_profile_for_email, email)
     try:
-        payload = auth_service.login(request.email.lower(), request.password)
+        payload = auth_service.login(email, request.password)
     except SupabaseAuthError as exc:
         error_status, detail = _login_error(exc)
         raise HTTPException(status_code=error_status, detail=detail) from exc
+
     user = payload.get("user") or {}
     if not user.get("id"):
         raise HTTPException(status_code=502, detail="Supabase did not return a user")
-    profile = load_profile(UUID(user["id"]), user.get("email"), (user.get("user_metadata") or {}).get("full_name"))
+
+    try:
+        profile = profile_future.result()
+    except Exception:
+        profile = None
+    user_id = str(user["id"])
+    if profile is None or profile.id != user_id:
+        profile = load_profile(UUID(user_id), user.get("email"), (user.get("user_metadata") or {}).get("full_name"))
     if profile.status != "active":
         raise HTTPException(status_code=403, detail="Account is not active")
     return AuthResponse(user=profile, session=_session(payload))

@@ -9,6 +9,7 @@ Platform = Literal["linkedin", "naukri"]
 WorkMode = Literal["remote", "onsite", "hybrid", "any"]
 AlertFrequency = Literal["daily", "weekly"]
 AlertRunStatus = Literal["queued", "running", "completed", "failed", "skipped"]
+AlertEmailStatus = Literal["not_sent", "queued", "sent", "failed"]
 
 
 class SavedSearch(BaseModel):
@@ -40,6 +41,8 @@ class AlertRun(BaseModel):
     new_jobs_count: int = 0
     result_summary: dict | None = None
     error_message: str | None
+    email_status: AlertEmailStatus = "not_sent"
+    email_error: str | None = None
 
 
 class SavedSearchAlertJob(BaseModel):
