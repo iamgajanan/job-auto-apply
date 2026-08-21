@@ -13,84 +13,42 @@ jobs:
   python-checks:
     name: Python syntax and app import
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install backend dependencies
         run: python -m pip install -r backend/requirements.txt
-
       - name: Compile backend
         run: python -m compileall -q backend/app
-
       - name: Import FastAPI application
-        env:
-          APP_NAME: Job Auto Apply
-          APP_ENV: test
-          REDIS_URL: redis://localhost:6379
-          BACKEND_HOST: 0.0.0.0
-          BACKEND_PORT: 8004
-          DATABASE_URL: ""
+        env: {APP_NAME: Job Auto Apply, APP_ENV: test, REDIS_URL: redis://localhost:6379, BACKEND_HOST: 0.0.0.0, BACKEND_PORT: 8004, DATABASE_URL: ""}
         run: python -c 'from app.main import app; print(app.title)'
         working-directory: backend
-
       - name: Run alert scheduler unit tests
-        env:
-          APP_NAME: Job Auto Apply
-          APP_ENV: test
-          REDIS_URL: redis://localhost:6379
-          BACKEND_HOST: 0.0.0.0
-          BACKEND_PORT: 8004
-          DATABASE_URL: ""
+        env: {APP_NAME: Job Auto Apply, APP_ENV: test, REDIS_URL: redis://localhost:6379, BACKEND_HOST: 0.0.0.0, BACKEND_PORT: 8004, DATABASE_URL: ""}
         run: python -m unittest test_alert_scheduler.py
         working-directory: backend
-
       - name: Run alert execution unit tests
-        env:
-          APP_NAME: Job Auto Apply
-          APP_ENV: test
-          REDIS_URL: redis://localhost:6379
-          BACKEND_HOST: 0.0.0.0
-          BACKEND_PORT: 8004
-          DATABASE_URL: ""
+        env: {APP_NAME: Job Auto Apply, APP_ENV: test, REDIS_URL: redis://localhost:6379, BACKEND_HOST: 0.0.0.0, BACKEND_PORT: 8004, DATABASE_URL: ""}
         run: python -m unittest test_alert_execution.py
         working-directory: backend
-
       - name: Run alert email unit tests
-        env:
-          APP_NAME: Job Auto Apply
-          APP_ENV: test
-          REDIS_URL: redis://localhost:6379
-          BACKEND_HOST: 0.0.0.0
-          BACKEND_PORT: 8004
-          DATABASE_URL: ""
+        env: {APP_NAME: Job Auto Apply, APP_ENV: test, REDIS_URL: redis://localhost:6379, BACKEND_HOST: 0.0.0.0, BACKEND_PORT: 8004, DATABASE_URL: ""}
         run: python -m unittest test_alert_email.py
         working-directory: backend
-
       - name: Run viewed jobs unit tests
-        env:
-          APP_NAME: Job Auto Apply
-          APP_ENV: test
-          REDIS_URL: redis://localhost:6379
-          BACKEND_HOST: 0.0.0.0
-          BACKEND_PORT: 8004
-          DATABASE_URL: ""
+        env: {APP_NAME: Job Auto Apply, APP_ENV: test, REDIS_URL: redis://localhost:6379, BACKEND_HOST: 0.0.0.0, BACKEND_PORT: 8004, DATABASE_URL: ""}
         run: python -m unittest test_viewed_jobs.py
         working-directory: backend
-
       - name: Run payment quota upgrade unit tests
-        env:
-          APP_NAME: Job Auto Apply
-          APP_ENV: test
-          REDIS_URL: redis://localhost:6379
-          BACKEND_HOST: 0.0.0.0
-          BACKEND_PORT: 8004
-          DATABASE_URL: ""
+        env: {APP_NAME: Job Auto Apply, APP_ENV: test, REDIS_URL: redis://localhost:6379, BACKEND_HOST: 0.0.0.0, BACKEND_PORT: 8004, DATABASE_URL: ""}
         run: python -m unittest test_payment_quota_upgrade.py
+        working-directory: backend
+      - name: Run API performance unit tests
+        env: {APP_NAME: Job Auto Apply, APP_ENV: test, REDIS_URL: redis://localhost:6379, BACKEND_HOST: 0.0.0.0, BACKEND_PORT: 8004, DATABASE_URL: ""}
+        run: python -m unittest test_api_performance.py
         working-directory: backend
