@@ -25,7 +25,10 @@ class SupabaseAuthService:
 
     def _get_client(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0), limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
+            self._client = httpx.Client(
+                timeout=httpx.Timeout(15.0, connect=5.0),
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
         return self._client
 
     def _http_request(self, method: str, path: str, *, access_token: str | None = None, json: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -34,7 +37,12 @@ class SupabaseAuthService:
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
         try:
-            response = self._get_client().request(method, f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/{path.lstrip('/')}", headers=headers, json=json)
+            response = self._get_client().request(
+                method,
+                f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/{path.lstrip('/')}",
+                headers=headers,
+                json=json,
+            )
         except httpx.TimeoutException as exc:
             raise SupabaseAuthError("Supabase Auth request timed out", 503) from exc
         except httpx.HTTPError as exc:
@@ -52,6 +60,10 @@ class SupabaseAuthService:
             return response.json()
         except ValueError as exc:
             raise SupabaseAuthError("Supabase Auth returned invalid JSON", 502) from exc
+
+    def warm_connection(self) -> None:
+        """Establish DNS/TLS/HTTP keep-alive before the first user auth request."""
+        self._http_request("GET", "/settings")
 
     def signup(self, email: str, password: str, full_name: str | None) -> dict[str, Any]:
         body: dict[str, Any] = {"email": email, "password": password}
