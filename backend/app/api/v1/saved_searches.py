@@ -1,6 +1,6 @@
 from time import monotonic
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.auth.dependencies import get_current_user
 from app.auth.schemas import CurrentUser
@@ -34,48 +34,30 @@ def list_saved_searches(current_user: CurrentUser = Depends(get_current_user)):
 
 
 @router.get("/{saved_search_id}", response_model=SavedSearch)
-def get_saved_search(
-    saved_search_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def get_saved_search(saved_search_id: str, current_user: CurrentUser = Depends(get_current_user)):
     return saved_search_service.get(current_user.id, saved_search_id)
 
 
 @router.get("/{saved_search_id}/alert-overview")
-def get_alert_overview(
-    saved_search_id: str,
-    limit: int = 10,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def get_alert_overview(saved_search_id: str, limit: int = 10, current_user: CurrentUser = Depends(get_current_user)):
     overview = saved_search_read_service.alert_overview(current_user.id, saved_search_id, limit)
     if overview is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Saved search not found")
     return overview
 
 
 @router.get("/{saved_search_id}/alert-status", response_model=SavedSearchAlertStatus)
-def get_alert_status(
-    saved_search_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def get_alert_status(saved_search_id: str, current_user: CurrentUser = Depends(get_current_user)):
     return saved_search_service.alert_status(current_user.id, saved_search_id)
 
 
 @router.get("/{saved_search_id}/alert-jobs", response_model=list[SavedSearchAlertJob])
-def get_alert_jobs(
-    saved_search_id: str,
-    limit: int = 50,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def get_alert_jobs(saved_search_id: str, limit: int = 50, current_user: CurrentUser = Depends(get_current_user)):
     return saved_search_service.alert_jobs(current_user.id, saved_search_id, limit)
 
 
 @router.post("/{saved_search_id}/alert-test", status_code=status.HTTP_200_OK)
-def queue_test_alert(
-    saved_search_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def queue_test_alert(saved_search_id: str, current_user: CurrentUser = Depends(get_current_user)):
     run = saved_search_service.queue_test_alert(current_user.id, saved_search_id)
     new_jobs = int(run.get("new_jobs_count") or 0)
     email_status = run.get("email_status")
@@ -93,31 +75,21 @@ def queue_test_alert(
 
 
 @router.post("", response_model=SavedSearch, status_code=status.HTTP_201_CREATED)
-def create_saved_search(
-    request: CreateSavedSearchRequest,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def create_saved_search(request: CreateSavedSearchRequest, current_user: CurrentUser = Depends(get_current_user)):
     result = saved_search_service.create(current_user.id, request)
     _invalidate_saved_search_cache(current_user.id)
     return result
 
 
 @router.put("/{saved_search_id}", response_model=SavedSearch)
-def update_saved_search(
-    saved_search_id: str,
-    request: UpdateSavedSearchRequest,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def update_saved_search(saved_search_id: str, request: UpdateSavedSearchRequest, current_user: CurrentUser = Depends(get_current_user)):
     result = saved_search_service.update(current_user.id, saved_search_id, request)
     _invalidate_saved_search_cache(current_user.id)
     return result
 
 
 @router.delete("/{saved_search_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_saved_search(
-    saved_search_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-):
+def delete_saved_search(saved_search_id: str, current_user: CurrentUser = Depends(get_current_user)):
     saved_search_service.delete(current_user.id, saved_search_id)
     _invalidate_saved_search_cache(current_user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
