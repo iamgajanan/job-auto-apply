@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.auth.service import auth_service
 from app.core.logger import app_logger
 from app.db.connection import warm_database_pool
 from app.features.saved_searches.alert_email import deliver_one_email
@@ -13,11 +14,8 @@ from app.features.saved_searches.alert_scheduler import run_once
 async def _run_alert_worker() -> None:
     while True:
         try:
-            # Phase 5A: schedule due saved searches.
             await asyncio.to_thread(run_once)
-            # Phase 5B: execute queued searches and record only new jobs.
             await asyncio.to_thread(process_queued_alerts, 5)
-            # Phase 5C: deliver queued email notifications.
             for _ in range(5):
                 delivered = await asyncio.to_thread(deliver_one_email)
                 if not delivered:
@@ -33,14 +31,15 @@ async def _run_alert_worker() -> None:
 async def lifespan(app: FastAPI):
     app_logger.info("Backend Started")
     try:
-        # Pay the managed-Postgres connection setup cost at startup, not on
-        # the first authenticated API request.
-        await asyncio.to_thread(warm_database_pool)
+        await asyncio.gather(
+            asyncio.to_thread(warm_database_pool),
+            asyncio.to_thread(auth_service.warm_connection),
+        )
     except Exception:
-        app_logger.exception("Database warm-up failed; requests will retry the pool connection")
+        # One external warm-up failing must not prevent the API from starting.
+        app_logger.exception("Startup connection warm-up failed; requests will retry normally")
 
     alert_worker_task = asyncio.create_task(_run_alert_worker())
-
     try:
         yield
     finally:
