@@ -18,6 +18,22 @@ RAZORPAY_API = "https://api.razorpay.com/v1"
 
 
 class PaymentService:
+    @staticmethod
+    def quota_upgrade_sql() -> str:
+        return """
+        update public.quota_allocations
+        set ends_at = timezone('utc', now())
+        where user_id = :user_id
+          and starts_at <= timezone('utc', now())
+          and (ends_at is null or ends_at > timezone('utc', now()));
+
+        insert into public.quota_allocations (
+            user_id, plan_code, granted_searches, source, starts_at
+        ) values (
+            :user_id, :plan_code, :search_limit, 'payment', timezone('utc', now())
+        );
+        """
+
     def _require_keys(self) -> None:
         if not settings.RAZORPAY_KEY_ID or not settings.RAZORPAY_KEY_SECRET:
             raise HTTPException(status_code=503, detail="Razorpay is not configured")
@@ -225,6 +241,9 @@ class PaymentService:
                 {"payment_id": payment_id, "signature": signature, "id": payment["id"]},
             )
 
+            # A paid plan replaces the user's currently active quota window.
+            # This prevents 50 free searches + 100 paid searches from becoming 150.
+            connection.execute(text(self.quota_upgrade_sql().split("\n\ninsert into")[0]), {"user_id": user_id})
             connection.execute(
                 text(
                     """
