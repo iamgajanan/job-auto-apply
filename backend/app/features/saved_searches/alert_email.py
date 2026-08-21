@@ -41,9 +41,15 @@ def _render_email(search_name: str, jobs: list[dict[str, Any]]) -> tuple[str, st
     return subject, body
 
 
-def _load_pending_delivery() -> dict[str, Any] | None:
+def _load_pending_delivery(alert_run_id: str | None = None) -> dict[str, Any] | None:
+    where = "d.status = 'queued'"
+    params: dict[str, str] = {}
+    if alert_run_id:
+        where += " and d.alert_run_id = :alert_run_id"
+        params["alert_run_id"] = alert_run_id
+
     with get_engine().begin() as connection:
-        delivery = connection.execute(text("""
+        delivery = connection.execute(text(f"""
             select d.id, d.alert_run_id, d.attempts,
                    r.saved_search_id, r.user_id, r.created_at as run_created_at,
                    s.name as search_name,
@@ -54,11 +60,11 @@ def _load_pending_delivery() -> dict[str, Any] | None:
             join public.saved_searches s on s.id = r.saved_search_id
             left join auth.users u on u.id = r.user_id
             left join public.profiles p on p.id = r.user_id
-            where d.status = 'queued'
+            where {where}
             order by d.created_at
             for update of d skip locked
             limit 1
-        """)).mappings().first()
+        """), params).mappings().first()
         if not delivery:
             return None
 
@@ -93,8 +99,8 @@ def _send_via_resend(to_email: str, subject: str, html_body: str) -> str:
     return str(response.json().get("id") or "")
 
 
-def deliver_one_email() -> int:
-    delivery = _load_pending_delivery()
+def deliver_one_email(alert_run_id: str | None = None) -> int:
+    delivery = _load_pending_delivery(alert_run_id)
     if not delivery:
         return 0
     try:
