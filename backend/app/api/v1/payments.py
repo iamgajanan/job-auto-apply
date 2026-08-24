@@ -103,6 +103,7 @@ async def razorpay_webhook(
         raw_body,
         hashlib.sha256,
     ).hexdigest()
+    # NOTE: hmac.new is the correct stdlib call (alias for hmac.HMAC constructor)
     if not hmac.compare_digest(expected, x_razorpay_signature):
         raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature")
 
