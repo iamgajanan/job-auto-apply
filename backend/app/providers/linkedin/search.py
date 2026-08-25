@@ -43,7 +43,25 @@ class LinkedInSearch(BaseProvider):
 
     @staticmethod
     def _posted_filter(value: str) -> str | None:
-        return {"day": "r86400", "week": "r604800", "month": "r2592000"}.get((value or "").strip().lower())
+        """Map frontend posted_within values to LinkedIn's f_TPR query param.
+
+        LinkedIn only supports: past 24h (r86400), past week (r604800),
+        past month (r2592000).  Values without an exact match are rounded up
+        to the next supported window so users still get relevant results
+        instead of an unfiltered feed.
+        """
+        _map = {
+            # exact matches
+            "day":     "r86400",
+            "24h":     "r86400",
+            "week":    "r604800",
+            "month":   "r2592000",
+            # approximate: "3 days" → closest LinkedIn window is 1 week
+            "3 days":  "r604800",
+            # approximate: "15 days" → closest LinkedIn window is 1 month
+            "15 days": "r2592000",
+        }
+        return _map.get((value or "").strip().lower())
 
     @staticmethod
     def _work_mode_filter(value: str) -> str | None:

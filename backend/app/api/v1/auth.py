@@ -1,17 +1,62 @@
 from concurrent.futures import ThreadPoolExecutor
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import text
 
 from app.auth.dependencies import bearer_scheme, get_current_user, invalidate_auth_cache, load_profile
 from app.auth.schemas import AuthResponse, CurrentUser, LoginRequest, PasswordResetRequest, PasswordUpdateRequest, RefreshRequest, Session, SignupRequest, UserProfile
 from app.auth.service import SupabaseAuthError, auth_service
+from app.common.dependencies.rate_limit import auth_rate_limit, password_reset_rate_limit
+from app.config.settings import settings
 from app.db.connection import get_engine
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 _AUTH_LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="auth-profile")
+
+_COOKIE_ACCESS  = "jf_access"
+_COOKIE_REFRESH = "jf_refresh"
+_COOKIE_MAX_AGE_ACCESS  = 60 * 60          # 1 hour
+_COOKIE_MAX_AGE_REFRESH = 60 * 60 * 24 * 30  # 30 days
+
+
+def _set_auth_cookies(response: Response, session: Session | None) -> None:
+    """Write HttpOnly; Secure; SameSite=Strict cookies for access + refresh tokens.
+
+    These replace localStorage storage of JWTs.  The frontend still receives the
+    full AuthResponse body (so existing code continues to work during the
+    migration period), but all sensitive tokens are ALSO stored in HttpOnly
+    cookies that JS cannot read.
+    """
+    if session is None:
+        return
+    secure = settings.APP_ENV != "development"
+    response.set_cookie(
+        key=_COOKIE_ACCESS,
+        value=session.access_token,
+        httponly=True,
+        secure=secure,
+        samesite="strict",
+        max_age=_COOKIE_MAX_AGE_ACCESS,
+        path="/",
+    )
+    if session.refresh_token:
+        response.set_cookie(
+            key=_COOKIE_REFRESH,
+            value=session.refresh_token,
+            httponly=True,
+            secure=secure,
+            samesite="strict",
+            max_age=_COOKIE_MAX_AGE_REFRESH,
+            path="/api/auth/refresh",  # scoped — only sent on refresh calls
+        )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    """Expire both auth cookies on logout."""
+    response.delete_cookie(key=_COOKIE_ACCESS,  path="/")
+    response.delete_cookie(key=_COOKIE_REFRESH, path="/api/auth/refresh")
 
 
 def _session(payload: dict) -> Session | None:
@@ -53,7 +98,7 @@ def _login_error(exc: SupabaseAuthError) -> tuple[int, str]:
 
 
 @router.post("/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def signup(request: SignupRequest):
+def signup(request: SignupRequest, http_response: Response, _rl: None = Depends(auth_rate_limit)):
     try:
         payload = auth_service.signup(request.email.lower(), request.password, request.full_name)
     except SupabaseAuthError as exc:
@@ -67,8 +112,6 @@ def signup(request: SignupRequest):
             raise HTTPException(status_code=502, detail="Supabase signup completed without a user profile")
         return AuthResponse(user=profile, session=None, email_confirmation_required=True)
 
-    # New accounts are created by the Supabase trigger with these application
-    # defaults. Avoid an extra profile round-trip on the signup critical path.
     user_metadata = user.get("user_metadata") or {}
     profile = UserProfile(
         id=str(user_id),
@@ -78,11 +121,13 @@ def signup(request: SignupRequest):
         status="active",
         plan_code="free",
     )
-    return AuthResponse(user=profile, session=_session(payload), email_confirmation_required=payload.get("session") is None)
+    session = _session(payload)
+    _set_auth_cookies(http_response, session)
+    return AuthResponse(user=profile, session=session, email_confirmation_required=payload.get("session") is None)
 
 
 @router.post("/login", response_model=AuthResponse)
-def login(request: LoginRequest):
+def login(request: LoginRequest, http_response: Response, _rl: None = Depends(auth_rate_limit)):
     email = request.email.lower()
     profile_future = _AUTH_LOOKUP_EXECUTOR.submit(_profile_for_email, email)
     try:
@@ -104,11 +149,13 @@ def login(request: LoginRequest):
         profile = load_profile(UUID(user_id), user.get("email"), (user.get("user_metadata") or {}).get("full_name"))
     if profile.status != "active":
         raise HTTPException(status_code=403, detail="Account is not active")
-    return AuthResponse(user=profile, session=_session(payload))
+    session = _session(payload)
+    _set_auth_cookies(http_response, session)
+    return AuthResponse(user=profile, session=session)
 
 
 @router.post("/refresh", response_model=Session)
-def refresh(request: RefreshRequest):
+def refresh(request: RefreshRequest, http_response: Response):
     try:
         payload = auth_service.refresh(request.refresh_token)
     except SupabaseAuthError as exc:
@@ -116,11 +163,12 @@ def refresh(request: RefreshRequest):
     session = _session(payload)
     if not session:
         raise HTTPException(status_code=502, detail="Supabase did not return a refreshed session")
+    _set_auth_cookies(http_response, session)
     return session
 
 
 @router.post("/password-reset", status_code=status.HTTP_202_ACCEPTED)
-def password_reset(request: PasswordResetRequest):
+def password_reset(request: PasswordResetRequest, _rl: None = Depends(password_reset_rate_limit)):
     try:
         auth_service.request_password_reset(request.email.lower(), request.redirect_to)
     except SupabaseAuthError:
@@ -139,7 +187,8 @@ def update_password(request: PasswordUpdateRequest, credentials: HTTPAuthorizati
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+def logout(http_response: Response, credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+    _clear_auth_cookies(http_response)
     if not credentials:
         return
     try:

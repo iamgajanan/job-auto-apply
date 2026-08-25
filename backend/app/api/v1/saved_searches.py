@@ -1,9 +1,12 @@
-from time import monotonic
+import json
+import logging
 
+import redis
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.auth.dependencies import get_current_user
 from app.auth.schemas import CurrentUser
+from app.config.settings import settings
 from app.features.saved_searches.read_service import saved_search_read_service
 from app.features.saved_searches.schemas import (
     CreateSavedSearchRequest,
@@ -14,22 +17,59 @@ from app.features.saved_searches.schemas import (
 )
 from app.features.saved_searches.service import saved_search_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/saved-searches", tags=["Saved Searches"])
-_SAVED_SEARCH_CACHE_TTL = 10.0
-_saved_search_cache: dict[str, tuple[float, list[dict]]] = {}
+
+_SAVED_SEARCH_CACHE_TTL = 10  # seconds
+_redis_pool: redis.ConnectionPool | None = None
+_redis_client: redis.Redis | None = None
+
+
+def _redis() -> redis.Redis:
+    global _redis_pool, _redis_client
+    if _redis_client is None:
+        _redis_pool = redis.ConnectionPool.from_url(
+            settings.REDIS_URL, decode_responses=True,
+            socket_connect_timeout=2, socket_timeout=2,
+        )
+        _redis_client = redis.Redis(connection_pool=_redis_pool)
+    return _redis_client
+
+
+def _cache_key(user_id: str) -> str:
+    return f"saved_searches:{user_id}"
+
+
+def _cache_get(user_id: str) -> list | None:
+    try:
+        raw = _redis().get(_cache_key(user_id))
+        return json.loads(raw) if raw else None
+    except Exception as exc:
+        logger.warning("SavedSearch cache GET failed: %s", exc)
+        return None
+
+
+def _cache_put(user_id: str, items: list) -> None:
+    try:
+        _redis().setex(_cache_key(user_id), _SAVED_SEARCH_CACHE_TTL, json.dumps(items, default=str))
+    except Exception as exc:
+        logger.warning("SavedSearch cache SET failed: %s", exc)
 
 
 def _invalidate_saved_search_cache(user_id: str) -> None:
-    _saved_search_cache.pop(user_id, None)
+    try:
+        _redis().delete(_cache_key(user_id))
+    except Exception as exc:
+        logger.warning("SavedSearch cache DELETE failed: %s", exc)
 
 
 @router.get("", response_model=dict[str, list[SavedSearch]])
 def list_saved_searches(current_user: CurrentUser = Depends(get_current_user)):
-    cached = _saved_search_cache.get(current_user.id)
-    if cached and monotonic() - cached[0] < _SAVED_SEARCH_CACHE_TTL:
-        return {"saved_searches": cached[1]}
+    cached = _cache_get(current_user.id)
+    if cached is not None:
+        return {"saved_searches": cached}
     items = saved_search_service.list(current_user.id)
-    _saved_search_cache[current_user.id] = (monotonic(), items)
+    _cache_put(current_user.id, [i if isinstance(i, dict) else i.model_dump(mode="json") for i in items])
     return {"saved_searches": items}
 
 
