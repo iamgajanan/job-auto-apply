@@ -6,15 +6,17 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
-    APP_NAME: str
-    APP_ENV: str
+    APP_NAME: str = "Job Auto Apply"
+    APP_ENV: str = "production"
 
-    REDIS_URL: str
+    # Local Redis is the default for the Raspberry Pi deployment. An explicit
+    # REDIS_URL from the environment still overrides this value.
+    REDIS_URL: str = "redis://localhost:6379"
 
     DATABASE_URL: str = ""
 
-    BACKEND_HOST: str
-    BACKEND_PORT: int
+    BACKEND_HOST: str = "0.0.0.0"
+    BACKEND_PORT: int = 8004
 
     # Supabase Auth. Access tokens are issued and validated by Supabase Auth;
     # the application does not maintain its own JWT signing secret.
