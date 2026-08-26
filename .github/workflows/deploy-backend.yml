@@ -93,7 +93,7 @@ jobs:
             'RAZORPAY_KEY_SECRET':os.environ.get('RAZORPAY_KEY_SECRET',''),
             'RAZORPAY_WEBHOOK_SECRET':os.environ.get('RAZORPAY_WEBHOOK_SECRET',''),
             'SUPABASE_SERVICE_ROLE_KEY':os.environ['SUPABASE_SERVICE_ROLE_KEY'],
-            'APP_NAME':'Job Auto Apply',
+            'APP_NAME':'"Job Auto Apply"',
             'APP_ENV':'production',
             'BACKEND_HOST':'0.0.0.0',
             'BACKEND_PORT':'8004',
