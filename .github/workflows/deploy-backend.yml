@@ -79,8 +79,6 @@ jobs:
 
           cd "$BACKEND_DIR"
           "$VENV/python" -m pip install --disable-pip-version-check -r requirements.txt
-          "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
-
           cd "$APP_DIR"
           SUPABASE_DB_URL="$SUPABASE_DB_URL" SUPABASE_URL="$SUPABASE_URL" SUPABASE_PUBLISHABLE_KEY="$AUTH_KEY" RAZORPAY_KEY_ID="$RAZORPAY_KEY_ID" RAZORPAY_KEY_SECRET="$RAZORPAY_KEY_SECRET" RAZORPAY_WEBHOOK_SECRET="$RAZORPAY_WEBHOOK_SECRET" CORS_ORIGINS="$CORS_ORIGINS" SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_SERVICE_ROLE_KEY" "$VENV/python" - <<'PY'
           import os
@@ -99,7 +97,7 @@ jobs:
             'APP_ENV':'production',
             'BACKEND_HOST':'0.0.0.0',
             'BACKEND_PORT':'8004',
-            'REDIS_URL':'redis://localhost:6379',
+            'REDIS_URL':'redis://localhost:6379/0',
           }
           if os.environ.get('CORS_ORIGINS'):
             managed['CORS_ORIGINS']=os.environ['CORS_ORIGINS']
@@ -108,6 +106,11 @@ jobs:
           p.write_text('\n'.join(lines)+'\n')
           p.chmod(0o600)
           PY
+
+          # Import check runs AFTER .env is written so REDIS_URL and all settings are available
+          cd "$BACKEND_DIR"
+          "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
+          cd "$APP_DIR"
 
           sudo -n install -m 0644 "$APP_DIR/deploy/job-auto-apply.service" /etc/systemd/system/job-auto-apply.service
           sudo -n systemctl daemon-reload
