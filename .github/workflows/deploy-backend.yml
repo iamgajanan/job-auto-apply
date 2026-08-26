@@ -112,9 +112,28 @@ jobs:
           "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
           cd "$APP_DIR"
 
-          # Pre-flight: verify Redis is reachable before starting the service
+          # Pre-flight: ensure Redis is running (try to start it if not)
           echo "==> Checking Redis..."
-          redis-cli -h 127.0.0.1 -p 6379 -n 0 ping || { echo "ERROR: Redis is not responding on localhost:6379. Start Redis first."; exit 1; }
+          if ! redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
+            echo "Redis not responding — attempting to start..."
+            # Try native redis-server service first
+            sudo -n systemctl start redis-server.service 2>/dev/null || true
+            sleep 3
+            # If still down, try docker-compose redis
+            if ! redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
+              cd "$APP_DIR"
+              docker compose up -d redis 2>/dev/null || docker-compose up -d redis 2>/dev/null || true
+              sleep 5
+            fi
+            # Final check — hard fail with clear message if still down
+            if ! redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
+              echo "ERROR: Redis is not responding after start attempts."
+              echo "Fix: SSH to Pi and run: sudo systemctl start redis-server"
+              echo "  OR: cd ~/Projects/job-auto-apply && docker compose up -d redis"
+              sudo -n systemctl status redis-server.service --no-pager || true
+              exit 1
+            fi
+          fi
           echo "Redis: OK"
 
           # Kill any stale process holding port 8004 (e.g. from a previous crashed deploy)
