@@ -112,29 +112,28 @@ jobs:
           "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
           cd "$APP_DIR"
 
-          # Pre-flight: ensure Redis is running (try to start it if not)
+          # Redis check: try to start if down, warn but continue if still unavailable.
+          # The app is Redis-tolerant — cache/rate-limiting fail-open so searches
+          # still work without Redis (just uncached and unthrottled).
           echo "==> Checking Redis..."
-          if ! redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
+          if redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
+            echo "Redis: OK"
+          else
             echo "Redis not responding — attempting to start..."
-            # Try native redis-server service first
             sudo -n systemctl start redis-server.service 2>/dev/null || true
             sleep 3
-            # If still down, try docker-compose redis
             if ! redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
               cd "$APP_DIR"
               docker compose up -d redis 2>/dev/null || docker-compose up -d redis 2>/dev/null || true
               sleep 5
             fi
-            # Final check — hard fail with clear message if still down
-            if ! redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
-              echo "ERROR: Redis is not responding after start attempts."
-              echo "Fix: SSH to Pi and run: sudo systemctl start redis-server"
-              echo "  OR: cd ~/Projects/job-auto-apply && docker compose up -d redis"
-              sudo -n systemctl status redis-server.service --no-pager || true
-              exit 1
+            if redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
+              echo "Redis: started successfully"
+            else
+              echo "WARNING: Redis unavailable — deploy continues. Search cache and rate limiting will be disabled."
+              echo "  Fix later: SSH to Pi → sudo systemctl start redis-server OR docker compose up -d redis"
             fi
-          fi
-          echo "Redis: OK"
+          fi"
 
           # Kill any stale process holding port 8004 (e.g. from a previous crashed deploy)
           STALE_PID=$(ss -tlnp 'sport = :8004' 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)

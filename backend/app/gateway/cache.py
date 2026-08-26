@@ -1,9 +1,12 @@
 import hashlib
 import json
+import logging
 
 import redis
 
 from app.config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 # One shared connection pool for the whole process instead of every
 # SearchCache() instance opening its own connection.
@@ -34,12 +37,19 @@ class SearchCache:
         return "jobs:" + hashlib.sha256(raw.encode()).hexdigest()
 
     def get(self, request):
-        key = self.build_key(request)
-        value = self.redis.get(key)
-        if value:
-            return json.loads(value)
-        return None
+        try:
+            key = self.build_key(request)
+            value = self.redis.get(key)
+            if value:
+                return json.loads(value)
+            return None
+        except redis.RedisError as exc:
+            logger.warning("SearchCache.get failed (Redis unavailable): %s", exc)
+            return None
 
     def set(self, request, jobs):
-        key = self.build_key(request)
-        self.redis.setex(key, self.ttl, json.dumps(jobs))
+        try:
+            key = self.build_key(request)
+            self.redis.setex(key, self.ttl, json.dumps(jobs))
+        except redis.RedisError as exc:
+            logger.warning("SearchCache.set failed (Redis unavailable): %s", exc)

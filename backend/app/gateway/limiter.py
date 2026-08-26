@@ -1,7 +1,11 @@
+import logging
+
 import redis
 
 from app.config.settings import settings
 from app.core.logger import app_logger
+
+logger = logging.getLogger(__name__)
 
 # Shared Redis pool for all gateway controls.
 _redis_pool = redis.ConnectionPool.from_url(
@@ -19,6 +23,9 @@ class RateLimiter:
 
     The platform check uses one Redis Lua script so platform='all' cannot
     reserve LinkedIn and then fail to reserve Naukri (or vice versa).
+
+    Both layers fail-open when Redis is unavailable so a Redis outage does
+    not block all searches — rate limiting is best-effort.
     """
 
     CLIENT_LIMIT = 10
@@ -56,18 +63,22 @@ class RateLimiter:
         return self.allow_client(key)
 
     def allow_client(self, key: str):
-        redis_key = f"rate:client:{key}"
-        current = self.redis.incr(redis_key)
+        try:
+            redis_key = f"rate:client:{key}"
+            current = self.redis.incr(redis_key)
 
-        if current == 1:
-            self.redis.expire(redis_key, self.CLIENT_WINDOW_SECONDS)
+            if current == 1:
+                self.redis.expire(redis_key, self.CLIENT_WINDOW_SECONDS)
 
-        ttl = max(self.redis.ttl(redis_key), 0)
-        app_logger.debug(f"{redis_key} count={current} ttl={ttl}")
+            ttl = max(self.redis.ttl(redis_key), 0)
+            app_logger.debug(f"{redis_key} count={current} ttl={ttl}")
 
-        if current > self.CLIENT_LIMIT:
-            return False, ttl
-        return True, ttl
+            if current > self.CLIENT_LIMIT:
+                return False, ttl
+            return True, ttl
+        except redis.RedisError as exc:
+            logger.warning("RateLimiter.allow_client failed (Redis unavailable) — fail-open: %s", exc)
+            return True, 0  # fail-open: allow the request
 
     def allow_platforms(self, platforms: list[str]):
         """Atomically reserve scrape-start cooldowns for requested platforms."""
@@ -80,16 +91,20 @@ class RateLimiter:
         if not normalized:
             return True, 0
 
-        keys = [f"rate:platform:{name}" for name in normalized]
-        cooldowns = [str(self.PLATFORM_COOLDOWN_SECONDS[name]) for name in normalized]
-        allowed, ttl = self.redis.eval(
-            self._RESERVE_PLATFORMS,
-            len(keys),
-            *keys,
-            *cooldowns,
-        )
+        try:
+            keys = [f"rate:platform:{name}" for name in normalized]
+            cooldowns = [str(self.PLATFORM_COOLDOWN_SECONDS[name]) for name in normalized]
+            allowed, ttl = self.redis.eval(
+                self._RESERVE_PLATFORMS,
+                len(keys),
+                *keys,
+                *cooldowns,
+            )
 
-        app_logger.debug(
-            f"platform reservation platforms={normalized} allowed={bool(allowed)} ttl={ttl}"
-        )
-        return bool(allowed), int(ttl)
+            app_logger.debug(
+                f"platform reservation platforms={normalized} allowed={bool(allowed)} ttl={ttl}"
+            )
+            return bool(allowed), int(ttl)
+        except redis.RedisError as exc:
+            logger.warning("RateLimiter.allow_platforms failed (Redis unavailable) — fail-open: %s", exc)
+            return True, 0  # fail-open: allow the request
