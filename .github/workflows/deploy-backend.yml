@@ -63,7 +63,7 @@ jobs:
           }
           trap on_error ERR
 
-          echo "STEP: preconditions" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "STEP: preconditions" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           test -d "$APP_DIR/.git"
           test -x "$VENV/python"
           test -n "$SUPABASE_DB_URL"
@@ -72,16 +72,16 @@ jobs:
           test -n "$SUPABASE_SERVICE_ROLE_KEY"
           test -n "$CI_TEST_USER_EMAIL"
           test -n "$CI_TEST_USER_PASSWORD"
-          echo "STEP: git pull" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "STEP: git pull" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           cd "$APP_DIR"
           git fetch --prune origin just-scrapping
           git checkout just-scrapping
           git reset --hard origin/just-scrapping
 
-          echo "STEP: pip install" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "STEP: pip install" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           cd "$BACKEND_DIR"
           "$VENV/python" -m pip install --disable-pip-version-check -r requirements.txt
-          echo "STEP: write .env" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "STEP: write .env" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           cd "$APP_DIR"
           SUPABASE_DB_URL="$SUPABASE_DB_URL" SUPABASE_URL="$SUPABASE_URL" SUPABASE_PUBLISHABLE_KEY="$AUTH_KEY" RAZORPAY_KEY_ID="$RAZORPAY_KEY_ID" RAZORPAY_KEY_SECRET="$RAZORPAY_KEY_SECRET" RAZORPAY_WEBHOOK_SECRET="$RAZORPAY_WEBHOOK_SECRET" CORS_ORIGINS="$CORS_ORIGINS" SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_SERVICE_ROLE_KEY" "$VENV/python" - <<'PY'
           import os
@@ -110,13 +110,13 @@ jobs:
           p.chmod(0o600)
           PY
 
-          echo "STEP: import check" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "STEP: import check" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           # Import check runs AFTER .env is written so REDIS_URL and all settings are available
           cd "$BACKEND_DIR"
           "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
           cd "$APP_DIR"
 
-          echo "STEP: redis check" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "STEP: redis check" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           # Redis check: try to start if down, warn but continue if still unavailable.
           # The app is Redis-tolerant — cache/rate-limiting fail-open so searches
           # still work without Redis (just uncached and unthrottled).
@@ -148,13 +148,13 @@ jobs:
             sleep 2
           fi
 
-          echo "STEP: systemctl restart" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "STEP: systemctl restart" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           sudo -n install -m 0644 "$APP_DIR/deploy/job-auto-apply.service" /etc/systemd/system/job-auto-apply.service
           sudo -n systemctl daemon-reload
           sudo -n systemctl enable job-auto-apply.service
           sudo -n systemctl restart job-auto-apply.service
 
-          echo "STEP: health check loop" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "STEP: health check loop" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           for i in {1..30}; do
             if curl -fsS --max-time 3 http://127.0.0.1:8004/ >/tmp/job-health.json; then break; fi
             if [ "$i" -lt 30 ]; then sleep 2; continue; fi
