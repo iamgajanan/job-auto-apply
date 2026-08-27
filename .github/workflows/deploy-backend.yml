@@ -189,6 +189,8 @@ jobs:
           cat /tmp/public-db.json
           if [ "$code" != 200 ]; then echo "WARNING: public database health check returned $code — Cloudflare tunnel may be down."; fi
 
+          # Enable command tracing for smoke tests so failures are visible
+          set -x
           TMP=$(mktemp -d)
           trap 'rm -rf "$TMP"' EXIT
           expect(){
