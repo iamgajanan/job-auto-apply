@@ -191,7 +191,11 @@ jobs:
 
           TMP=$(mktemp -d)
           trap 'rm -rf "$TMP"' EXIT
-          expect(){ [ "$1" = "$2" ] || { echo "Expected $1 got $2 ($4)"; cat "$3" || true; exit 1; }; }
+          expect(){
+            echo "SMOKE: checking $4 want=$1 got=$2"
+            [ "$1" = "$2" ] || { echo "FAIL: Expected $1 got $2 ($4)"; cat "$3" || true; exit 1; }
+            echo "PASS: $4"
+          }
 
           code=$(curl -sS -o "$TMP/db" -w '%{http_code}' http://127.0.0.1:8004/api/v1/health/database); expect 200 "$code" "$TMP/db" db-health
           code=$(curl -sS -o "$TMP/plans" -w '%{http_code}' http://127.0.0.1:8004/api/v1/plans); expect 200 "$code" "$TMP/plans" plans
@@ -208,7 +212,12 @@ jobs:
           done
           code=$(curl -sS -o "$TMP/fake" -w '%{http_code}' -H 'Authorization: Bearer invalid-token' http://127.0.0.1:8004/api/v1/auth/me); expect 401 "$code" "$TMP/fake" fake-token
           code=$(curl -sS -o "$TMP/jobs" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/jobs/search -H 'Content-Type: application/json' --data '{"platform":"naukri","job_title":"react","location":"pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}'); expect 401 "$code" "$TMP/jobs" unauthenticated-job-search
-          code=$(curl -sS -o "$TMP/refresh" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/refresh -H 'Content-Type: application/json' --data '{"refresh_token":"invalid-refresh-token-value-123456"}'); [ "$code" -ge 400 ]
+          echo "SMOKE: checking refresh-invalid-token"
+          code=$(curl -sS -o "$TMP/refresh" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/refresh -H 'Content-Type: application/json' --data '{"refresh_token":"invalid-refresh-token-value-123456"}' || echo "000")
+          echo "SMOKE: refresh got code=[$code]"
+          cat "$TMP/refresh" || true
+          if ! [ "$code" -ge 400 ] 2>/dev/null; then echo "FAIL: refresh-invalid-token expected >=400 got [$code]"; exit 1; fi
+          echo "PASS: refresh-invalid-token ($code)"
           code=$(curl -sS -o "$TMP/password" -w '%{http_code}' -X PUT http://127.0.0.1:8004/api/v1/auth/password -H 'Authorization: Bearer invalid-token' -H 'Content-Type: application/json' --data '{"password":"AnotherPassword123!"}'); expect 401 "$code" "$TMP/password" invalid-password-token
           code=$(curl -sS -o "$TMP/logout" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H 'Authorization: Bearer invalid-token'); expect 401 "$code" "$TMP/logout" invalid-logout-token
           code=$(curl -sS -o "$TMP/reset" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/password-reset -H 'Content-Type: application/json' --data '{"email":"nobody-ci@example.com"}'); expect 202 "$code" "$TMP/reset" password-reset
