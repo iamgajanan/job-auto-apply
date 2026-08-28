@@ -63,7 +63,6 @@ jobs:
           }
           trap on_error ERR
 
-          echo "STEP: preconditions" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           test -d "$APP_DIR/.git"
           test -x "$VENV/python"
           test -n "$SUPABASE_DB_URL"
@@ -72,16 +71,16 @@ jobs:
           test -n "$SUPABASE_SERVICE_ROLE_KEY"
           test -n "$CI_TEST_USER_EMAIL"
           test -n "$CI_TEST_USER_PASSWORD"
-          echo "STEP: git pull" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+
           cd "$APP_DIR"
           git fetch --prune origin just-scrapping
           git checkout just-scrapping
           git reset --hard origin/just-scrapping
 
-          echo "STEP: pip install" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           cd "$BACKEND_DIR"
           "$VENV/python" -m pip install --disable-pip-version-check -r requirements.txt
-          echo "STEP: write .env" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
+
           cd "$APP_DIR"
           SUPABASE_DB_URL="$SUPABASE_DB_URL" SUPABASE_URL="$SUPABASE_URL" SUPABASE_PUBLISHABLE_KEY="$AUTH_KEY" RAZORPAY_KEY_ID="$RAZORPAY_KEY_ID" RAZORPAY_KEY_SECRET="$RAZORPAY_KEY_SECRET" RAZORPAY_WEBHOOK_SECRET="$RAZORPAY_WEBHOOK_SECRET" CORS_ORIGINS="$CORS_ORIGINS" SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_SERVICE_ROLE_KEY" "$VENV/python" - <<'PY'
           import os
@@ -96,10 +95,6 @@ jobs:
             'RAZORPAY_KEY_SECRET':os.environ.get('RAZORPAY_KEY_SECRET',''),
             'RAZORPAY_WEBHOOK_SECRET':os.environ.get('RAZORPAY_WEBHOOK_SECRET',''),
             'SUPABASE_SERVICE_ROLE_KEY':os.environ['SUPABASE_SERVICE_ROLE_KEY'],
-            'APP_NAME':'"Job Auto Apply"',
-            'APP_ENV':'production',
-            'BACKEND_HOST':'0.0.0.0',
-            'BACKEND_PORT':'8004',
             'REDIS_URL':'redis://localhost:6379/0',
           }
           if os.environ.get('CORS_ORIGINS'):
@@ -110,70 +105,21 @@ jobs:
           p.chmod(0o600)
           PY
 
-          echo "STEP: import check" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
-          # Import check runs AFTER .env is written so REDIS_URL and all settings are available
-          cd "$BACKEND_DIR"
-          "$VENV/python" -c 'from app.main import app; print("FastAPI import OK")'
-          cd "$APP_DIR"
-
-          echo "STEP: redis check" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
-          # Redis check: try to start if down, warn but continue if still unavailable.
-          # The app is Redis-tolerant — cache/rate-limiting fail-open so searches
-          # still work without Redis (just uncached and unthrottled).
-          echo "==> Checking Redis..."
-          if redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
-            echo "Redis: OK"
-          else
-            echo "Redis not responding — attempting to start..."
-            sudo -n systemctl start redis-server.service 2>/dev/null || true
-            sleep 3
-            if ! redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
-              cd "$APP_DIR"
-              docker compose up -d redis 2>/dev/null || docker-compose up -d redis 2>/dev/null || true
-              sleep 5
-            fi
-            if redis-cli -h 127.0.0.1 -p 6379 -n 0 ping > /dev/null 2>&1; then
-              echo "Redis: started successfully"
-            else
-              echo "WARNING: Redis unavailable — deploy continues. Search cache and rate limiting will be disabled."
-              echo "  Fix later: SSH to Pi → sudo systemctl start redis-server OR docker compose up -d redis"
-            fi
-          fi
-
-          # Kill any stale process holding port 8004 (e.g. from a previous crashed deploy)
-          STALE_PID=$(ss -tlnp 'sport = :8004' 2>/dev/null | grep -oP 'pid=\K[0-9]+' || true)
-          if [ -n "$STALE_PID" ]; then
-            echo "WARNING: Killing stale process $STALE_PID on port 8004"
-            sudo -n kill -9 "$STALE_PID" || true
-            sleep 2
-          fi
-
-          echo "STEP: systemctl restart" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           sudo -n install -m 0644 "$APP_DIR/deploy/job-auto-apply.service" /etc/systemd/system/job-auto-apply.service
           sudo -n systemctl daemon-reload
           sudo -n systemctl enable job-auto-apply.service
           sudo -n systemctl restart job-auto-apply.service
 
-          echo "STEP: health check loop" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           for i in {1..30}; do
             if curl -fsS --max-time 3 http://127.0.0.1:8004/ >/tmp/job-health.json; then break; fi
-            if [ "$i" -lt 30 ]; then sleep 2; continue; fi
-            echo "=== HEALTH CHECK TIMED OUT — diagnostics ==="
-            sudo -n systemctl status job-auto-apply.service --no-pager || true
-            sudo -n journalctl -u job-auto-apply.service -n 160 --no-pager || true
-            echo "=== Port 8004 binding state ==="
-            ss -tlnp 'sport = :8004' || true
-            echo "=== Redis state ==="
-            redis-cli -h 127.0.0.1 -p 6379 -n 0 ping || true
-            echo "=== Memory ==="
-            free -h || true
-            exit 1
+            [ "$i" -lt 30 ] || { sudo -n systemctl status job-auto-apply.service --no-pager || true; sudo -n journalctl -u job-auto-apply.service -n 80 --no-pager || true; exit 1; }
+            sleep 2
           done
           cat /tmp/job-health.json
 
           sudo -n systemctl restart cloudflared-n8n.service
           sleep 3
-          sudo -n systemctl is-active --quiet cloudflared-n8n.service || echo "WARNING: cloudflared-n8n.service is not active — public tunnel may be down"
+          sudo -n systemctl is-active --quiet cloudflared-n8n.service || echo "WARNING: cloudflared tunnel may be down — continuing deploy"
 
           public_ok=false
           for i in {1..5}; do
@@ -182,22 +128,16 @@ jobs:
             if [ "$code" = 200 ]; then public_ok=true; cat /tmp/public.json; break; fi
             sleep 2
           done
-          if [ "$public_ok" != true ]; then echo "WARNING: public URL jobs.n8npi.live is unreachable — Cloudflare tunnel may be down. Local smoke tests still passing."; fi
+          if [ "$public_ok" != true ]; then echo "WARNING: public URL unreachable — tunnel may be down"; fi
 
           code=$(curl -sS -o /tmp/public-db.json -w '%{http_code}' --http1.1 --max-time 20 https://jobs.n8npi.live/api/v1/health/database || true)
           echo "public database health: $code"
           cat /tmp/public-db.json
-          if [ "$code" != 200 ]; then echo "WARNING: public database health check returned $code — Cloudflare tunnel may be down."; fi
+          if [ "$code" != 200 ]; then echo "WARNING: public DB health returned $code — tunnel may be down"; fi
 
-          # Enable command tracing for smoke tests so failures are visible
-          set -x
           TMP=$(mktemp -d)
           trap 'rm -rf "$TMP"' EXIT
-          expect(){
-            echo "SMOKE: checking $4 want=$1 got=$2"
-            [ "$1" = "$2" ] || { echo "FAIL: Expected $1 got $2 ($4)"; cat "$3" || true; exit 1; }
-            echo "PASS: $4"
-          }
+          expect(){ [ "$1" = "$2" ] || { echo "Expected $1 got $2 ($4)"; cat "$3" || true; exit 1; }; }
 
           code=$(curl -sS -o "$TMP/db" -w '%{http_code}' http://127.0.0.1:8004/api/v1/health/database); expect 200 "$code" "$TMP/db" db-health
           code=$(curl -sS -o "$TMP/plans" -w '%{http_code}' http://127.0.0.1:8004/api/v1/plans); expect 200 "$code" "$TMP/plans" plans
@@ -214,12 +154,7 @@ jobs:
           done
           code=$(curl -sS -o "$TMP/fake" -w '%{http_code}' -H 'Authorization: Bearer invalid-token' http://127.0.0.1:8004/api/v1/auth/me); expect 401 "$code" "$TMP/fake" fake-token
           code=$(curl -sS -o "$TMP/jobs" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/jobs/search -H 'Content-Type: application/json' --data '{"platform":"naukri","job_title":"react","location":"pune","experience":"5 years","work_mode":"any","posted_within":"day","easy_apply":false}'); expect 401 "$code" "$TMP/jobs" unauthenticated-job-search
-          echo "SMOKE: checking refresh-invalid-token"
-          code=$(curl -sS -o "$TMP/refresh" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/refresh -H 'Content-Type: application/json' --data '{"refresh_token":"invalid-refresh-token-value-123456"}' || echo "000")
-          echo "SMOKE: refresh got code=[$code]"
-          cat "$TMP/refresh" || true
-          if ! [ "$code" -ge 400 ] 2>/dev/null; then echo "FAIL: refresh-invalid-token expected >=400 got [$code]"; exit 1; fi
-          echo "PASS: refresh-invalid-token ($code)"
+          code=$(curl -sS -o "$TMP/refresh" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/refresh -H 'Content-Type: application/json' --data '{"refresh_token":"invalid-refresh-token-value-123456"}'); [ "$code" -ge 400 ]
           code=$(curl -sS -o "$TMP/password" -w '%{http_code}' -X PUT http://127.0.0.1:8004/api/v1/auth/password -H 'Authorization: Bearer invalid-token' -H 'Content-Type: application/json' --data '{"password":"AnotherPassword123!"}'); expect 401 "$code" "$TMP/password" invalid-password-token
           code=$(curl -sS -o "$TMP/logout" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/logout -H 'Authorization: Bearer invalid-token'); expect 401 "$code" "$TMP/logout" invalid-logout-token
           code=$(curl -sS -o "$TMP/reset" -w '%{http_code}' -X POST http://127.0.0.1:8004/api/v1/auth/password-reset -H 'Content-Type: application/json' --data '{"email":"nobody-ci@example.com"}'); expect 202 "$code" "$TMP/reset" password-reset
@@ -276,7 +211,7 @@ jobs:
             -H 'Content-Type: application/json' \
             --data "{\"email\":\"$CI_USER\",\"password\":\"$CI_PASS\"}")
           expect 200 "$code" "$TMP/public-login" public-ci-user-login
-  
+
           PUBLIC_TOKEN=$("$VENV/python" - "$TMP/public-login" <<'PY'
           import json,sys
           d=json.load(open(sys.argv[1])); print((d.get('session') or {}).get('access_token',''))
@@ -284,26 +219,26 @@ jobs:
           )
           [ -n "$PUBLIC_TOKEN" ] || { echo "ERROR: public login succeeded but no token returned"; cat "$TMP/public-login"; exit 1; }
           echo "Public login: PASS — token obtained"
-  
+
           code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-me" -w '%{http_code}' -H "Authorization: Bearer $PUBLIC_TOKEN" https://jobs.n8npi.live/api/v1/auth/me)
           expect 200 "$code" "$TMP/public-me" public-authenticated-me
           echo "Public GET /auth/me: PASS"
-  
+
           code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-account" -w '%{http_code}' -H "Authorization: Bearer $PUBLIC_TOKEN" https://jobs.n8npi.live/api/v1/account/me)
           expect 200 "$code" "$TMP/public-account" public-authenticated-account
           echo "Public GET /account/me: PASS"
-  
+
           code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-out" -w '%{http_code}' -X POST https://jobs.n8npi.live/api/v1/auth/logout -H "Authorization: Bearer $PUBLIC_TOKEN")
           expect 204 "$code" "$TMP/public-out" public-logout
           echo "Public logout: PASS"
-  
+
           code=$(curl -sS --http1.1 --max-time 30 -o "$TMP/public-after" -w '%{http_code}' -H "Authorization: Bearer $PUBLIC_TOKEN" https://jobs.n8npi.live/api/v1/auth/me)
           expect 401 "$code" "$TMP/public-after" public-post-logout-token-rejected
           echo "Public token rejected after logout: PASS"
-  
+
           echo "FULL AUTHENTICATED FLOW: PASS"
           echo "PUBLIC AUTHENTICATED FLOW: PASS"
           echo 'POST-DEPLOY API SMOKE CHECKS: PASS'
           else
-          echo "WARNING: Skipping public authenticated flow — Cloudflare tunnel is unreachable."
+          echo "WARNING: Skipping public flow — Cloudflare tunnel unreachable."
           fi
