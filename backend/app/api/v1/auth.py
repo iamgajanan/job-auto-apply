@@ -169,11 +169,18 @@ def refresh(request: RefreshRequest, http_response: Response):
 
 @router.post("/password-reset", status_code=status.HTTP_202_ACCEPTED)
 def password_reset(request: PasswordResetRequest, _rl: None = Depends(password_reset_rate_limit)):
+    email = request.email.strip().lower()
     try:
-        auth_service.request_password_reset(request.email.lower(), request.redirect_to)
-    except SupabaseAuthError:
-        pass
-    return {"message": "If the account exists, password reset instructions will be sent."}
+        profile = _profile_for_email(email)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Unable to verify the email address right now") from exc
+    if profile is None:
+        raise HTTPException(status_code=404, detail="No account found with this email address")
+    try:
+        auth_service.request_password_reset(email, request.redirect_to)
+    except SupabaseAuthError as exc:
+        raise HTTPException(status_code=503, detail="Unable to send password reset instructions") from exc
+    return {"message": "Password reset instructions have been sent."}
 
 
 @router.put("/password", status_code=status.HTTP_204_NO_CONTENT)
