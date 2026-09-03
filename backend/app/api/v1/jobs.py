@@ -85,6 +85,11 @@ def search_jobs(
     # ── Step 2: run the scrape BEFORE touching quota ──
     try:
         jobs = service.search_jobs(request, client_ip)
+    except HTTPException:
+        # Preserve intentional API errors raised by the search pipeline, such
+        # as client/provider cooldown responses. Do not turn them into a generic
+        # scraper failure, and do not consume quota.
+        raise
     except PlatformAccessError as exc:
         # Scraper was blocked / hit CAPTCHA — do NOT deduct quota.
         logger.warning("Scraper blocked for user %s: %s", current_user.id, exc)
