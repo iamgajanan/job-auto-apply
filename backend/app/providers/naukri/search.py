@@ -23,8 +23,6 @@ DESCRIPTION_SELECTORS = ["span.job-desc", ".job-description"]
 class NaukriSearch(BaseProvider):
     name = "naukri"
     capabilities = ProviderCapabilities(easy_apply=False, remote=True, salary=True, login=True)
-    # Return a useful first page set instead of scraping 100 records across six
-    # browser navigations. The exact query is cached for 30 minutes upstream.
     JOB_LIMIT = 60
     PROXY_URL = settings.SCRAPER_PROXY_URL or None
     PAGE_SIZE = 20
@@ -103,7 +101,18 @@ class NaukriSearch(BaseProvider):
         value = (requested or "").strip().lower()
         if value in {"", "any", "all"}:
             return True
-        limit = {"day": 1, "24h": 1, "week": 7, "month": 30}.get(value)
+        limit = {
+            "day": 1,
+            "24h": 1,
+            "3 days": 3,
+            "3days": 3,
+            "3-day": 3,
+            "week": 7,
+            "15 days": 15,
+            "15days": 15,
+            "15-day": 15,
+            "month": 30,
+        }.get(value)
         if limit is None:
             return True
         days = self._posted_days(posted)
