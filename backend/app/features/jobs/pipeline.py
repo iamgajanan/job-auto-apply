@@ -4,6 +4,12 @@ from fastapi import HTTPException
 
 
 class SearchPipeline:
+    # A successful scrape can occasionally return an empty page when the
+    # upstream job site responds incompletely. Retry a small number of times
+    # before treating the search as genuinely empty.
+    EMPTY_RESULT_RETRIES = 2
+    EMPTY_RESULT_RETRY_DELAY_SECONDS = 2
+
     def __init__(self, cache, limiter, engine):
         self.cache = cache
         self.limiter = limiter
@@ -38,9 +44,24 @@ class SearchPipeline:
 
         jobs = self.engine.search(request)
 
-        # Results are returned directly. They are not persisted in PostgreSQL.
-        # Redis remains responsible only for short-lived cache/rate-limit state.
-        self.cache.set(request, jobs)
+        # Some upstream providers can temporarily return an empty result even
+        # though matching jobs are available. Retry without re-running the
+        # client/platform limiter checks: the search has already reserved its
+        # request slot, and re-checking here could incorrectly trigger the
+        # provider cooldown against our own retry.
+        for attempt in range(self.EMPTY_RESULT_RETRIES):
+            if jobs:
+                break
+
+            import time
+
+            time.sleep(self.EMPTY_RESULT_RETRY_DELAY_SECONDS)
+            jobs = self.engine.search(request)
+
+        # Do not cache an empty scrape. Otherwise a transient empty upstream
+        # response can make subsequent requests appear empty until cache expiry.
+        if jobs:
+            self.cache.set(request, jobs)
 
         _ = perf_counter() - started
         return jobs
