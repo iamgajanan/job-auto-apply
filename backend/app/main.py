@@ -5,6 +5,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.lifespan import lifespan
 from app.middleware.cors import register_cors
 from app.middleware.request_logger import register_request_logger
+from app.middleware.security_headers import SecurityHeadersMiddleware
 
 app = FastAPI(
     title="Job Auto Apply",
@@ -12,6 +13,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(SecurityHeadersMiddleware)
 register_cors(app)
 register_request_logger(app)
 register_exception_handlers(app)
